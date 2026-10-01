@@ -1,0 +1,5 @@
+.pio/
+.vscode/
+build/
+test_alpha
+test_weather
