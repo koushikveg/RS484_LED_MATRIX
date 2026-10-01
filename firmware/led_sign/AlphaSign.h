@@ -10,7 +10,7 @@
 //
 // Write TEXT file data field, section 6.1.1:
 //
-//   'A'  FileLabel  [ESC  DisplayPosition  ModeCode  [SpecialSpecifier]]  Message
+//   'A'  FileLabel  { [ESC  DisplayPosition  ModeCode  [SpecialSpecifier]]  Message }...
 
 #pragma once
 
@@ -134,12 +134,20 @@ class Writer {
 
 inline char hexDigit(uint8_t v) { return v < 10 ? '0' + v : 'A' + (v - 10); }
 
-// Builds a complete Write TEXT file packet into `out`.
-// Only printable ASCII (0x20-0x7E) from `text` is copied so user input can't
-// inject protocol control codes. Returns the packet length, or 0 if `cap`
-// was too small.
-inline size_t buildWriteText(uint8_t* out, size_t cap, const TextOptions& o,
-                             const char* text) {
+// One display page: a mode field followed by its text. A TEXT file can hold
+// several pages; the sign shows them in order and loops (section 6.1.1, note 1).
+struct Page {
+  const char* text;
+  int mode;  // index into MODES, -1 = no mode field (sign default)
+};
+
+// Builds a complete Write TEXT file packet holding `count` pages into `out`.
+// Speed and colour from `o` are applied to every page; `o.mode` is ignored
+// (each page carries its own). Only printable ASCII (0x20-0x7E) is copied so
+// user input can't inject protocol control codes. Returns the packet length,
+// or 0 if `cap` was too small.
+inline size_t buildWriteTextPages(uint8_t* out, size_t cap, const TextOptions& o,
+                                  const Page* pages, size_t count) {
   Writer w(out, cap);
   for (size_t i = 0; i < SYNC_NULS; ++i) w.put(NUL);
   w.put(SOH);
@@ -152,28 +160,34 @@ inline size_t buildWriteText(uint8_t* out, size_t cap, const TextOptions& o,
   w.put(CMD_WRITE_TEXT);
   w.put(o.fileLabel);
 
-  if (o.mode >= 0 && (size_t)o.mode < MODE_COUNT) {
-    w.put(ESC);
-    w.put(POS_MIDDLE);
-    w.put(MODES[o.mode].code);
-    if (MODES[o.mode].special) w.put(MODES[o.mode].special);
-  }
-  if (o.speed >= 1 && o.speed <= 5) w.put(SPEED_1 + (o.speed - 1));
-  if (o.color >= 0 && (size_t)o.color < COLOR_COUNT) {
-    w.put(SELECT_COLOR);
-    w.put(COLORS[o.color].code);
-  }
-
   // The priority file holds at most 125 bytes of TEXT file data.
-  size_t limit = (o.fileLabel == FILE_PRIORITY)
-                     ? PRIORITY_MAX_BYTES - (w.len() - stx - 3)
-                     : (size_t)-1;
-  size_t written = 0;
-  for (const char* p = text; p && *p && written < limit; ++p) {
-    uint8_t c = (uint8_t)*p;
-    if (c >= 0x20 && c <= 0x7E) {
-      w.put(c);
-      ++written;
+  size_t dataStart = w.len();
+  size_t limit = (o.fileLabel == FILE_PRIORITY) ? PRIORITY_MAX_BYTES : (size_t)-1;
+  auto room = [&]() { return limit - (w.len() - dataStart); };
+
+  for (size_t pg = 0; pg < count; ++pg) {
+    int mode = pages[pg].mode;
+    bool hasMode = mode >= 0 && (size_t)mode < MODE_COUNT;
+    bool hasSpeed = o.speed >= 1 && o.speed <= 5;
+    bool hasColor = o.color >= 0 && (size_t)o.color < COLOR_COUNT;
+    size_t header = (hasMode ? 3 + (MODES[mode].special ? 1 : 0) : 0) +
+                    (hasSpeed ? 1 : 0) + (hasColor ? 2 : 0);
+    if (header > room()) break;
+
+    if (hasMode) {
+      w.put(ESC);
+      w.put(POS_MIDDLE);
+      w.put(MODES[mode].code);
+      if (MODES[mode].special) w.put(MODES[mode].special);
+    }
+    if (hasSpeed) w.put(SPEED_1 + (o.speed - 1));
+    if (hasColor) {
+      w.put(SELECT_COLOR);
+      w.put(COLORS[o.color].code);
+    }
+    for (const char* p = pages[pg].text; p && *p && room() > 0; ++p) {
+      uint8_t c = (uint8_t)*p;
+      if (c >= 0x20 && c <= 0x7E) w.put(c);
     }
   }
 
@@ -189,6 +203,13 @@ inline size_t buildWriteText(uint8_t* out, size_t cap, const TextOptions& o,
   }
   w.put(EOT);
   return w.overflow ? 0 : w.len();
+}
+
+// Builds a single-page Write TEXT file packet using `o.mode`.
+inline size_t buildWriteText(uint8_t* out, size_t cap, const TextOptions& o,
+                             const char* text) {
+  Page page = {text, o.mode};
+  return buildWriteTextPages(out, cap, o, &page, 1);
 }
 
 }  // namespace alpha

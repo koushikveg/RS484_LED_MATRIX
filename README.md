@@ -3,9 +3,17 @@
 ESP32 firmware for driving an **Adaptive Micro Systems 80×7 transit sign**
 (PN 1105-2126) over RS-485 using the **Alpha sign protocol**.
 
-You can send messages from the USB Serial Monitor, from a web page served by
-the ESP32 over Wi-Fi, or from your own code with `showMessage("...")`. The last
-message is saved in flash and sent again whenever the ESP32 starts.
+It has two display modes:
+
+- **Weather:** the ESP32 joins your home Wi-Fi, pulls today's forecast for your
+  city from [Open-Meteo](https://open-meteo.com) (free, no API key) every 15
+  minutes, and the sign cycles through it:
+  `MILWAUKEE` → `PARTLY CLOUDY` → `NOW 62F` → `HIGH 66F` → `LOW 51F` → `HUMIDITY 72%` → `RAIN 20%`
+- **Message:** shows any text you type.
+
+You can control it from the USB Serial Monitor, from a web page
+(`http://ledsign.local` on your home network), or from your own code. Settings,
+including Wi-Fi and location, are saved in flash and survive power cycles.
 
 | Document | What it covers |
 |---|---|
@@ -94,8 +102,9 @@ Sign connector pinout (from the sign datasheet):
 pio run -t upload && pio device monitor
 ```
 
-The defaults are at the top of `led_sign.ino`: pins, Wi-Fi name/password, and an
-optional existing network to join.
+Pins, the fallback access point and timing settings are at the top of
+`led_sign.ino`. You don't need to put your Wi-Fi password in the code (see
+below).
 
 ## First power-up: finding the serial settings
 
@@ -117,14 +126,59 @@ If the sign still shows nothing, it may have been configured for a transit
 J1708/J1587 protocol instead of Alpha. If you have the vehicle's original head
 unit, connect it to the same A/B wires, type `/sniff`, and capture what it sends.
 
+## Setting up weather
+
+1. **Connect to your home Wi-Fi.** In the Serial Monitor type:
+   ```
+   /ssid MyHomeNetwork
+   /pass my-wifi-password
+   ```
+   The ESP32 prints its address once connected, e.g.
+   `Wi-Fi connected: http://ledsign.local or http://192.168.1.42`.
+   The ESP32 only supports **2.4 GHz** Wi-Fi.
+
+   *No USB handy?* With no saved network (or if it can't connect for 20 s), the
+   ESP32 starts its own Wi-Fi network **`LED-Sign`** (password `ledsign123`).
+   Join it, open **http://192.168.4.1**, and fill in *Home Wi-Fi*.
+
+2. **Set your location:**
+   ```
+   /location Milwaukee
+   ```
+   Use only the city name. Open-Meteo's search doesn't understand "Milwaukee, WI". If it
+   picks the wrong place, use coordinates instead (right-click a spot in Google
+   Maps to copy them). The optional label is what the sign shows:
+   ```
+   /latlon 43.0389 -87.9065 HOME
+   ```
+   Setting a location switches the sign to weather mode and fetches right away.
+
+3. **Optional:** `/units c` for Celsius, `/showplace off` to drop the city
+   name from the cycle.
+
+The ESP32 sends the whole cycle to the sign as one multi-page message, so the
+sign does the cycling itself. Pages that fit (about 13 characters) hold still;
+longer ones scroll. The sign is only rewritten when the numbers change, plus
+once an hour in case the sign was power cycled on its own. If updates fail for
+3 hours the sign shows `WEATHER OFFLINE` instead of old data.
+
+Typing a message switches to message mode. `/weather on` switches back.
+
 ## Using it
 
 ### Serial Monitor
 
-Type any text and press Enter to display it. Commands:
+Type any text and press Enter to display it (this turns weather off). Commands:
 
 | Command | Effect |
 |---|---|
+| `/ssid <name>`, `/pass <password>` | Home Wi-Fi network and password (saved; reconnects) |
+| `/location <city>` | Look up a city and show its weather |
+| `/latlon <lat> <lon> [label]` | Set the weather location by coordinates |
+| `/units f\|c` | Fahrenheit or Celsius |
+| `/showplace on\|off` | Include the city name in the cycle |
+| `/weather on\|off` | Switch between weather and your message |
+| `/update` | Fetch the weather now |
 | `/mode <name>` | `rotate` `hold` `flash` `rollup` `rolldown` `rollleft` `rollright` `wipeup` `wipedown` `wipeleft` `wiperight` `scroll` `auto` `rollin` `rollout` `wipein` `wipeout` `compressed` `twinkle` `sparkle` `snow` `interlock` `switch` `slide` `spray` `starburst` |
 | `/speed <0-5>` | 1 = slowest, 5 = fastest, 0 = sign default |
 | `/color <name\|none>` | `red` `green` `amber` `orange` `yellow` `rainbow1` … (tricolor signs only) |
@@ -139,12 +193,22 @@ Type any text and press Enter to display it. Commands:
 At 80 columns with a 7-row font, about 13 characters fit on screen. Longer
 messages should use `rotate` (scrolling).
 
-### Wi-Fi
+### Web page
 
-Join the Wi-Fi network **`LED-Sign`** (password `ledsign123`) and browse to
-**http://192.168.4.1**. The page lets you type a message and pick mode, speed,
-colour and priority. **Change the password** in `led_sign.ino` before using it
-anywhere public.
+On your home network, browse to **http://ledsign.local**, or to the IP address
+shown by `/status` (some Android phones don't resolve `.local` names). The page
+lets you:
+
+- set the city and units and switch to weather;
+- send a message with a mode, speed, colour and priority;
+- change the home Wi-Fi network.
+
+The page has no login, so anyone on your home network can change the sign.
+The fallback `LED-Sign` network only runs while home Wi-Fi is unavailable.
+**Change its password** (`AP_PASSWORD` in `led_sign.ino`).
+
+Your Wi-Fi password is stored in the ESP32's flash (not encrypted) and is never
+shown on the web page or in `/status`.
 
 ### From your own code
 
@@ -152,6 +216,7 @@ anywhere public.
 showMessage("LAP 3  1:23.4");   // uses the current mode/speed/colour
 settings.text.mode = alpha::findMode("flash");
 showMessage("BOX BOX");
+setWeatherMode(true);           // back to the weather cycle
 ```
 
 `AlphaSign.h` is a standalone encoder with no Arduino dependencies:
@@ -162,7 +227,15 @@ opts.mode = alpha::findMode("hold");
 uint8_t buf[300];
 size_t len = alpha::buildWriteText(buf, sizeof(buf), opts, "HELLO");
 // write buf[0..len) to the RS-485 UART
+
+// Several pages that the sign cycles through on its own:
+alpha::Page pages[] = {{"HIGH 74F", alpha::findMode("hold")},
+                       {"PARTLY CLOUDY", alpha::findMode("rotate")}};
+len = alpha::buildWriteTextPages(buf, sizeof(buf), opts, pages, 2);
 ```
+
+`Weather.h` builds the Open-Meteo request URLs and parses the responses
+(no JSON library needed).
 
 ## How the protocol works
 
@@ -174,6 +247,8 @@ Each message is a single packet (manual section 5.1 / 6.1.1):
    (autobaud)        (all) (broadcast)     TEXT   'A'
 ```
 
+- A TEXT file can hold several pages. Each page is another `ESC pos mode text` group, and the sign shows them in turn and loops. The weather cycle uses this.
+- The sign has no degree symbol (the extended character set is only accented letters and currency), so temperatures show as `74F`.
 - File `A` exists from power-up, so no memory configuration is needed.
 - File `0` is the priority file. It overrides everything until an empty priority message is sent.
 - The ESP32 strips control characters from user text so typed input can't break the framing.
@@ -181,8 +256,10 @@ Each message is a single packet (manual section 5.1 / 6.1.1):
 ## Tests
 
 The packet encoder is unit tested on a PC against the examples in the
-protocol manual (Appendix F):
+protocol manual (Appendix F). The weather parser is tested against
+Open-Meteo-shaped responses, including `null` values and accented place names:
 
 ```sh
 g++ -std=c++11 -Wall -Wextra -I firmware/led_sign test/test_alpha.cpp -o test_alpha && ./test_alpha
+g++ -std=c++11 -Wall -Wextra -I firmware/led_sign test/test_weather.cpp -o test_weather && ./test_weather
 ```
