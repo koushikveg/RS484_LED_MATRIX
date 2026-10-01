@@ -1,0 +1,4 @@
+.pio/
+.vscode/
+build/
+test_alpha
