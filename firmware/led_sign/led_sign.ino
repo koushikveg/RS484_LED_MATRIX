@@ -1,5 +1,5 @@
 // led_sign.ino - ESP32 controller for an Adaptive Micro Systems 80x7 transit
-// sign (PN 1105-2111) over RS-485 using the Alpha sign protocol.
+// sign (PN 1105-2126) over RS-485 using the Alpha sign protocol.
 //
 // Control it three ways:
 //   * USB Serial Monitor (115200 baud): type a message, or /help for commands

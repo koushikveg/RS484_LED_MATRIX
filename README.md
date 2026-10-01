@@ -1,7 +1,7 @@
 # RS-485 LED Matrix Sign Controller (ESP32)
 
 ESP32 firmware for driving an **Adaptive Micro Systems 80×7 transit sign**
-(PN 1105-2111) over RS-485 using the **Alpha sign protocol**.
+(PN 1105-2126) over RS-485 using the **Alpha sign protocol**.
 
 You can send messages from the USB Serial Monitor, from a web page served by
 the ESP32 over Wi-Fi, or from your own code with `showMessage("...")`. The last
@@ -9,8 +9,29 @@ message is saved in flash and sent again whenever the ESP32 starts.
 
 | Document | What it covers |
 |---|---|
-| [`docs/80x7_Transit_Sign_1105-2111.pdf`](docs/80x7_Transit_Sign_1105-2111.pdf) | Sign specs, power, connector pinout |
+| [`docs/80x7_Transit_Sign_1105-2111.pdf`](docs/80x7_Transit_Sign_1105-2111.pdf) | Sign specs, power, connector pinout (sister model, see below) |
 | [`docs/Alpha_Sign_Communications_Protocol_9708-8061F.pdf`](docs/Alpha_Sign_Communications_Protocol_9708-8061F.pdf) | Alpha protocol reference (packet format, modes, colours) |
+
+## About the part number
+
+This sign is **PN 1105-2126**. The only datasheet available is for
+**PN 1105-2111**, another variant in the same 80×7 transit family (same case,
+matrix, 12 V supply and RS-485/J1708 interface). Adaptive doesn't publish what
+the last digits change. Typical differences between variants are LED colour,
+connector/cable, and the protocol firmware loaded at the factory.
+
+The firmware is written so those differences don't matter:
+
+- **Address and sign type:** every packet uses type `Z` (all signs) and address `00` (broadcast), so the sign responds whatever address it was programmed with.
+- **Baud rate and framing:** the sign autobauds on the leading NULs, and `/probe` tries every baud rate in both 7E2 and 8N1.
+- **Red vs. tricolor:** colour codes are only sent if you pick a colour. A red-only sign ignores them.
+- **Protocol:** if the factory loaded a J1708/J1587 transit protocol instead of Alpha, `/sniff` lets you capture what the original controller sends.
+
+**Check before powering up:** the pinout below comes from the 1105-2111
+datasheet. Before connecting 12 V, confirm your pigtail matches it: a
+**6-pin** Mate-N-Lok with heavy (16 AWG) red, orange and black wires and two
+thin (20 AWG) black and white wires. If your wires differ, don't guess.
+Look for a label on the sign or cable, or tell me what you see.
 
 ## Parts
 
