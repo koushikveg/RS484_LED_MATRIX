@@ -32,9 +32,15 @@
 
 // RS-485 transceiver pins. GPIO 16/17 are fine on ESP32 and ESP32-S3.
 // On an ESP32-C3 pick other pins (16/17 are used by the flash there).
-constexpr int RS485_RX_PIN = 16;  // transceiver RO
-constexpr int RS485_TX_PIN = 17;  // transceiver DI
-constexpr int RS485_DE_PIN = 4;   // transceiver DE + /RE tied together; -1 for auto-direction modules
+//
+// Default: auto-direction module (e.g. DIYables RS485-TTL, pins VCC GND RXD TXD).
+// Its pin names are from the module's point of view: module TXD -> ESP32 RX,
+// module RXD <- ESP32 TX.
+// For a MAX3485-style module with DE/RE pins, wire RO->RX, DI->TX, tie DE+RE
+// to a GPIO and set RS485_DE_PIN to that GPIO (e.g. 4).
+constexpr int RS485_RX_PIN = 16;  // module TXD (or RO)
+constexpr int RS485_TX_PIN = 17;  // module RXD (or DI)
+constexpr int RS485_DE_PIN = -1;  // -1 = module switches direction itself
 
 // Home Wi-Fi. You can leave these blank and set them later with /ssid and
 // /pass (or from the web page); saved values take priority over these.

@@ -46,7 +46,7 @@ Look for a label on the sign or cable, or tell me what you see.
 | Part | Notes |
 |---|---|
 | ESP32 dev board | Any ESP32 / ESP32-S3 board. On an ESP32-C3, change the RX/TX pins. |
-| RS-485 transceiver, **3.3 V** | MAX3485 / SP3485 module. Avoid 5 V MAX485 modules: their RO output would put 5 V on an ESP32 pin. |
+| RS-485 module | **DIYables RS485-TTL (auto flow control)** or any similar auto-direction module (pins VCC/GND/RXD/TXD). Power it from **3.3 V**. A MAX3485/SP3485 module with DE/RE pins also works (see below). Avoid bare 5 V MAX485 boards: their RO output would put 5 V on an ESP32 pin. |
 | 12 V power supply, ≥ 5 A | The sign draws about 36 W (3 A at 12 V). It accepts 9–26 V DC. |
 | 12 V → 5 V buck converter | Powers the ESP32 from the same supply (or use USB while testing). |
 | Mating connector | The sign's 1 ft pigtail ends in an AMP Mate-N-Lok 6-pin cap (350781-1). It mates with a 6-pin Mate-N-Lok plug (e.g. TE 350715-1 + socket contacts). Check this against your cable, or cut the pigtail and splice it. |
@@ -71,19 +71,29 @@ Sign connector pinout (from the sign datasheet):
                                    └──► buck 12V→5V ──► ESP32 5V/VIN
                   GND ─────────────┬──────────────► sign pin 1 (black, 16 AWG)
                                    ├──► buck GND
-                                   └──► ESP32 GND ─── transceiver GND
+                                   └──► ESP32 GND ─── RS-485 module GND
 
-   ESP32                 MAX3485 module               Sign
+   ESP32                 DIYables RS485 module        Sign
    3V3      ───────────► VCC
-   GPIO17 (TX) ────────► DI
-   GPIO16 (RX) ◄──────── RO
-   GPIO4    ───────────► DE + RE (tied)
-                         A  ───────────────────────► pin 3 (black, 20 AWG)
-                         B  ───────────────────────► pin 6 (white)
+   GND      ───────────► GND
+   GPIO17 (TX) ────────► RXD
+   GPIO16 (RX) ◄──────── TXD
+                         A+ ───────────────────────► pin 3 (black, 20 AWG)
+                         B- ───────────────────────► pin 6 (white)
+                         GND ──────────────────────► pin 1 (ground)
 ```
 
+The module's **RXD/TXD are labelled from the module's side**, so they cross
+over: ESP32 TX → module RXD, module TXD → ESP32 RX. The firmware's default
+`RS485_DE_PIN = -1` is right for this module because it switches between
+sending and receiving by itself.
+
+**Using a MAX3485/SP3485 module with DE/RE pins instead:** wire GPIO17 → DI,
+GPIO16 ← RO, tie DE and RE together to GPIO4, and set `RS485_DE_PIN = 4` in
+`led_sign.ino`.
+
 - **Grounds must be common.** The ESP32/transceiver ground has to connect to sign pin 1, or the RS-485 lines float.
-- If your transceiver module switches direction automatically (no DE/RE pins), set `RS485_DE_PIN = -1` in `led_sign.ino`.
+- Auto-direction modules usually have a 120 Ω termination resistor fitted. That's fine on this short cable; leave it in place.
 - A 120 Ω terminating resistor isn't needed for the 1–2 m cable used here.
 - Vendors label A/B inconsistently. If nothing shows up, **swap A and B** first.
 
