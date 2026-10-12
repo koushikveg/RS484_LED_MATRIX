@@ -30,17 +30,19 @@
 
 // ---------------------------------------------------------------- configuration
 
-// RS-485 transceiver pins. GPIO 16/17 are fine on ESP32 and ESP32-S3.
-// On an ESP32-C3 pick other pins (16/17 are used by the flash there).
+// RS-485 transceiver pins.
 //
-// Default: auto-direction module (e.g. DIYables RS485-TTL, pins VCC GND RXD TXD).
-// Its pin names are from the module's point of view: module TXD -> ESP32 RX,
-// module RXD <- ESP32 TX.
-// For a MAX3485-style module with DE/RE pins, wire RO->RX, DI->TX, tie DE+RE
-// to a GPIO and set RS485_DE_PIN to that GPIO (e.g. 4).
-constexpr int RS485_RX_PIN = 16;  // module TXD (or RO)
-constexpr int RS485_TX_PIN = 17;  // module RXD (or DI)
-constexpr int RS485_DE_PIN = -1;  // -1 = module switches direction itself
+// Default: ESP32-S3 RS485/CAN board (Waveshare ESP32-S3-RS485-CAN, also sold
+// as KLAYERS). The transceiver is on the board: TX = GPIO17, RX = GPIO18,
+// and GPIO21 enables the driver (HIGH = send, LOW = receive).
+//
+// Separate module on a plain ESP32 instead:
+//   * Auto-direction module (DIYables RS485-TTL etc., pins VCC GND RXD TXD):
+//     RX = 16 (module TXD), TX = 17 (module RXD), DE = -1.
+//   * MAX3485-style module: RX = RO, TX = DI, DE = the GPIO wired to DE+RE.
+constexpr int RS485_RX_PIN = 18;
+constexpr int RS485_TX_PIN = 17;
+constexpr int RS485_DE_PIN = 21;  // -1 if the transceiver switches direction itself
 
 // Home Wi-Fi. You can leave these blank and set them later with /ssid and
 // /pass (or from the web page); saved values take priority over these.

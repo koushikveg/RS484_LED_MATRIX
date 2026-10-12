@@ -45,10 +45,8 @@ Look for a label on the sign or cable, or tell me what you see.
 
 | Part | Notes |
 |---|---|
-| ESP32 dev board | Any ESP32 / ESP32-S3 board. On an ESP32-C3, change the RX/TX pins. |
-| RS-485 module | **DIYables RS485-TTL (auto flow control)** or any similar auto-direction module (pins VCC/GND/RXD/TXD). Power it from **3.3 V**. A MAX3485/SP3485 module with DE/RE pins also works (see below). Avoid bare 5 V MAX485 boards: their RO output would put 5 V on an ESP32 pin. |
+| **ESP32-S3 RS485/CAN board** | Waveshare ESP32-S3-RS485-CAN, also sold as KLAYERS. It has an isolated RS-485 transceiver built in and runs on 7–36 V, so it can share the sign's 12 V supply. The firmware defaults are for this board. |
 | 12 V power supply, ≥ 5 A | The sign draws about 36 W (3 A at 12 V). It accepts 9–26 V DC. |
-| 12 V → 5 V buck converter | Powers the ESP32 from the same supply (or use USB while testing). |
 | Mating connector | The sign's 1 ft pigtail ends in an AMP Mate-N-Lok 6-pin cap (350781-1). It mates with a 6-pin Mate-N-Lok plug (e.g. TE 350715-1 + socket contacts). Check this against your cable, or cut the pigtail and splice it. |
 | 5 A inline fuse | On the +12 V feed. |
 
@@ -58,44 +56,54 @@ Sign connector pinout (from the sign datasheet):
 
 | Pin | Wire | Function | Connect to |
 |---|---|---|---|
-| 1 | Black 16 AWG | Power ground | Supply **−** and ESP32/transceiver **GND** |
+| 1 | Black 16 AWG | Power ground | Supply **−**, board power **GND**, and board RS-485 **GND** |
 | 2 | — | No connect | — |
-| 3 | Black 20 AWG | J1708A (RS-485 **A / +**) | Transceiver **A** |
+| 3 | Black 20 AWG | J1708A (RS-485 **A / +**) | Board RS-485 **A** |
 | 4 | Red 16 AWG | +12 V unswitched | Supply **+** (via fuse) |
 | 5 | Orange 16 AWG | +12 V switched (ignition) | Supply **+** (via fuse). The sign stays off without it. |
-| 6 | White 20 AWG | J1708B (RS-485 **B / −**) | Transceiver **B** |
+| 6 | White 20 AWG | J1708B (RS-485 **B / −**) | Board RS-485 **B** |
 
 ```
-                 +12V ──[5A fuse]──┬──────────────► sign pin 4 (red)
-                                   ├──────────────► sign pin 5 (orange)
-                                   └──► buck 12V→5V ──► ESP32 5V/VIN
-                  GND ─────────────┬──────────────► sign pin 1 (black, 16 AWG)
-                                   ├──► buck GND
-                                   └──► ESP32 GND ─── RS-485 module GND
+   12 V supply                                 Sign
+   + ──[5A fuse]──┬──────────────────────────► pin 4 (red)
+                  ├──────────────────────────► pin 5 (orange)
+                  └──► board power in (7-36V)
+   − ─────────────┬──────────────────────────► pin 1 (black, 16 AWG)
+                  └──► board power GND
 
-   ESP32                 DIYables RS485 module        Sign
-   3V3      ───────────► VCC
-   GND      ───────────► GND
-   GPIO17 (TX) ────────► RXD
-   GPIO16 (RX) ◄──────── TXD
-                         A+ ───────────────────────► pin 3 (black, 20 AWG)
-                         B- ───────────────────────► pin 6 (white)
-                         GND ──────────────────────► pin 1 (ground)
+   ESP32-S3 RS485/CAN board
+   RS485 A   ────────────────────────────────► pin 3 (black, 20 AWG)
+   RS485 B   ────────────────────────────────► pin 6 (white)
+   RS485 GND ────────────────────────────────► pin 1 (ground)
 ```
 
-The module's **RXD/TXD are labelled from the module's side**, so they cross
-over: ESP32 TX → module RXD, module TXD → ESP32 RX. The firmware's default
-`RS485_DE_PIN = -1` is right for this module because it switches between
-sending and receiving by itself.
-
-**Using a MAX3485/SP3485 module with DE/RE pins instead:** wire GPIO17 → DI,
-GPIO16 ← RO, tie DE and RE together to GPIO4, and set `RS485_DE_PIN = 4` in
-`led_sign.ino`.
-
-- **Grounds must be common.** The ESP32/transceiver ground has to connect to sign pin 1, or the RS-485 lines float.
-- Auto-direction modules usually have a 120 Ω termination resistor fitted. That's fine on this short cable; leave it in place.
-- A 120 Ω terminating resistor isn't needed for the 1–2 m cable used here.
+- **Connect the RS-485 GND terminal too.** The board's RS-485 port is
+  isolated from the rest of the board, so its ground is separate from the
+  power ground. Without a ground reference to the sign, the A/B signals float.
+- The board has a 120 Ω termination resistor that's **off by default**
+  (jumper). Leave it off; the cable to the sign is short.
 - Vendors label A/B inconsistently. If nothing shows up, **swap A and B** first.
+- While testing on the bench you can power the board from USB-C alone. The
+  sign still needs its own 12 V.
+
+The board's RS-485 transceiver is wired to TX = GPIO17, RX = GPIO18, and a
+driver-enable line on GPIO21, which the firmware raises while sending. These
+come from community configs for the Waveshare board and haven't been checked
+against a KLAYERS unit. If `/probe` shows nothing even after swapping A/B,
+compare the pin table in the board's manual with the top of `led_sign.ino`.
+
+### Using a plain ESP32 and a separate RS-485 module instead
+
+Edit the pin settings at the top of `led_sign.ino`:
+
+| Module | Wiring | Settings |
+|---|---|---|
+| Auto-direction (DIYables RS485-TTL etc.: VCC, GND, RXD, TXD) | ESP32 TX(17) → module **RXD**, module **TXD** → ESP32 RX(16), VCC to **3.3 V** | `RX=16, TX=17, DE=-1` |
+| MAX3485 / SP3485 (DI, RO, DE, RE) | TX(17) → DI, RO → RX(16), DE+RE tied → GPIO4, VCC to 3.3 V | `RX=16, TX=17, DE=4` |
+
+Power a separate module from 3.3 V (a 5 V module would send 5 V back into an
+ESP32 pin). Its A/B/GND go to sign pins 3/6/1, and the ESP32 needs a 12 V → 5 V
+buck converter or USB for power.
 
 ## Building and flashing
 
@@ -103,13 +111,20 @@ GPIO16 ← RO, tie DE and RE together to GPIO4, and set `RS485_DE_PIN = 4` in
 
 1. Install the ESP32 board package: *Boards Manager → "esp32" by Espressif*.
 2. Open `firmware/led_sign/led_sign.ino`.
-3. Select your board (e.g. *ESP32 Dev Module*) and port, then upload.
-4. Open the Serial Monitor at **115200** baud with line ending **Newline**.
+3. Board: **ESP32S3 Dev Module**. Under *Tools*, set **USB CDC On Boot → Enabled**.
+   Without that, Serial Monitor output goes to the board's internal UART instead
+   of the USB-C port.
+4. Pick the port, upload, and open the Serial Monitor at **115200** baud with
+   line ending **Newline**.
+
+If the upload doesn't start, hold **BOOT**, tap **RESET**, release **BOOT**, and
+upload again. Press **RESET** afterwards to run the new firmware.
 
 **PlatformIO**
 
 ```sh
-pio run -t upload && pio device monitor
+pio run -t upload && pio device monitor          # ESP32-S3 RS485/CAN board
+pio run -e esp32dev -t upload                    # plain ESP32 + separate module
 ```
 
 Pins, the fallback access point and timing settings are at the top of
