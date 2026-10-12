@@ -5,10 +5,11 @@ ESP32 firmware for driving an **Adaptive Micro Systems 80×7 transit sign**
 
 It has two display modes:
 
-- **Weather:** the ESP32 joins your home Wi-Fi, pulls today's forecast for your
-  city from [Open-Meteo](https://open-meteo.com) (free, no API key) every 15
-  minutes, and the sign cycles through it:
-  `MILWAUKEE` → `PARTLY CLOUDY` → `NOW 62F` → `HIGH 66F` → `LOW 51F` → `HUMIDITY 72%` → `RAIN 20%`
+- **Weather (default, set to Ames, Iowa):** the ESP32 joins your home Wi-Fi,
+  pulls today's forecast from [Open-Meteo](https://open-meteo.com) (free, no
+  API key) every 15 minutes, and the sign scrolls it right to left, one screen
+  after another:
+  `AMES` → `PARTLY CLOUDY` → `NOW 62F  HIGH 66F  LOW 51F` → `RAIN 0.30 IN  40% CHANCE` → `SNOW 1.2 IN  30% CHANCE`
 - **Message:** shows any text you type.
 
 You can control it from the USB Serial Monitor, from a web page
@@ -166,26 +167,52 @@ unit, connect it to the same A/B wires, type `/sniff`, and capture what it sends
    ESP32 starts its own Wi-Fi network **`LED-Sign`** (password `ledsign123`).
    Join it, open **http://192.168.4.1**, and fill in *Home Wi-Fi*.
 
-2. **Set your location:**
+2. **Location:** it's preset to **Ames, Iowa** (42.0308, −93.6319, shown as
+   `AMES`), so there's nothing to do. To change it, use a city name:
    ```
-   /location Milwaukee
+   /location Des Moines
    ```
-   Use only the city name. Open-Meteo's search doesn't understand "Milwaukee, WI". If it
+   Use only the city name. Open-Meteo's search doesn't understand "Des Moines, IA". If it
    picks the wrong place, use coordinates instead (right-click a spot in Google
    Maps to copy them). The optional label is what the sign shows:
    ```
-   /latlon 43.0389 -87.9065 HOME
+   /latlon 42.0308 -93.6319 AMES
    ```
    Setting a location switches the sign to weather mode and fetches right away.
+   To change the built-in default, edit `DEFAULT_PLACE`, `DEFAULT_LATITUDE` and
+   `DEFAULT_LONGITUDE` at the top of `led_sign.ino`.
 
 3. **Optional:** `/units c` for Celsius, `/showplace off` to drop the city
    name from the cycle.
 
-The ESP32 sends the whole cycle to the sign as one multi-page message, so the
-sign does the cycling itself. Pages that fit (about 13 characters) hold still;
-longer ones scroll. The sign is only rewritten when the numbers change, plus
-once an hour in case the sign was power cycled on its own. If updates fail for
-3 hours the sign shows `WEATHER OFFLINE` instead of old data.
+### What the sign shows
+
+| Screen | Example | When |
+|---|---|---|
+| City | `AMES` | Always (turn off with `/showplace off`) |
+| Today's conditions | `PARTLY CLOUDY` | Always |
+| Temperatures | `NOW 62F  HIGH 66F  LOW 51F` | Always |
+| Rain | `RAIN 0.30 IN  40% CHANCE` | Only when the chance of rain is **above 5%** |
+| Snow | `SNOW 1.2 IN  30% CHANCE` | Only when the chance of snow is **above 5%** |
+
+- Every screen scrolls right to left. To change that, set `WEATHER_SCROLL_MODE`
+  at the top of `led_sign.ino` to another mode from `/help`, e.g. `"hold"`.
+  (`/mode` only affects typed messages.)
+- Amounts are today's forecast totals in **inches**, even with `/units c`.
+  Rain includes showers. Amounts too small to show read `<0.01 IN` (rain) or
+  `<0.1 IN` (snow).
+- **How rain and snow chances are split:** Open-Meteo gives one precipitation
+  chance per hour, not separate rain and snow chances. The firmware looks at
+  each hour of today. If snow is forecast for that hour, the hour counts toward
+  snow. If rain is forecast, it counts toward rain (it can count toward both).
+  If neither amount is forecast, the temperature decides: at or below freezing
+  is snow, above is rain. Each type's chance is the highest chance among its
+  hours.
+
+The ESP32 sends all the screens to the sign as one multi-page message, so the
+sign does the cycling itself. The sign is only rewritten when the forecast
+changes, plus once an hour in case the sign was power cycled on its own. If
+updates fail for 3 hours the sign shows `WEATHER OFFLINE` instead of old data.
 
 Typing a message switches to message mode. `/weather on` switches back.
 
@@ -198,7 +225,7 @@ Type any text and press Enter to display it (this turns weather off). Commands:
 | Command | Effect |
 |---|---|
 | `/ssid <name>`, `/pass <password>` | Home Wi-Fi network and password (saved; reconnects) |
-| `/location <city>` | Look up a city and show its weather |
+| `/location <city>` | Look up a city and show its weather (default: Ames, Iowa) |
 | `/latlon <lat> <lon> [label]` | Set the weather location by coordinates |
 | `/units f\|c` | Fahrenheit or Celsius |
 | `/showplace on\|off` | Include the city name in the cycle |

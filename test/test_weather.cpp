@@ -23,30 +23,53 @@ static int failures = 0;
     }                                                       \
   } while (0)
 
-// Shape of a real Open-Meteo forecast response for the request built by
-// weather::forecastUrl(). Note the *_units objects repeat every key with
-// string values; the parser must read from "current"/"daily" instead.
-static const char* FORECAST =
-    "{\"latitude\":43.04,\"longitude\":-87.91,\"generationtime_ms\":0.05,"
-    "\"utc_offset_seconds\":-18000,\"timezone\":\"America/Chicago\","
-    "\"timezone_abbreviation\":\"GMT-5\",\"elevation\":188.0,"
-    "\"current_units\":{\"time\":\"iso8601\",\"interval\":\"seconds\","
-    "\"temperature_2m\":\"\\u00b0F\",\"relative_humidity_2m\":\"%\"},"
-    "\"current\":{\"time\":\"2026-10-01T17:00\",\"interval\":900,"
-    "\"temperature_2m\":61.6,\"relative_humidity_2m\":72},"
-    "\"daily_units\":{\"time\":\"iso8601\",\"weather_code\":\"wmo code\","
-    "\"temperature_2m_max\":\"\\u00b0F\",\"temperature_2m_min\":\"\\u00b0F\","
-    "\"precipitation_probability_max\":\"%\"},"
-    "\"daily\":{\"time\":[\"2026-10-01\"],\"weather_code\":[2],"
-    "\"temperature_2m_max\":[66.4],\"temperature_2m_min\":[-0.6],"
-    "\"precipitation_probability_max\":[20]}}";
+// Builds a response shaped like Open-Meteo's for the request made by
+// weather::forecastUrl(): "*_units" objects repeat every key with string
+// values (the parser must read from "current"/"hourly"/"daily"), and hourly
+// arrays have one value per hour of today.
+struct Hour {
+  double temp, chance, rain, showers, snow;
+};
 
-static const char* FORECAST_NULLS =
-    "{\"current\":{\"time\":\"2026-10-01T17:00\",\"interval\":900,"
-    "\"temperature_2m\":null,\"relative_humidity_2m\":null},"
-    "\"daily\":{\"time\":[\"2026-10-01\"],\"weather_code\":[95],"
-    "\"temperature_2m_max\":[30.2],\"temperature_2m_min\":[21.9],"
-    "\"precipitation_probability_max\":[null]}}";
+static std::string num(double v) {
+  if (isnan(v)) return "null";
+  char b[32];
+  snprintf(b, sizeof(b), "%g", v);
+  return b;
+}
+
+static std::string forecastJson(const char* now, int code, double hi, double lo, double rainSum,
+                                double showersSum, double snowSum, const Hour* hours, size_t count) {
+  std::string temp, chance, rain, showers, snow;
+  for (size_t i = 0; i < count; ++i) {
+    const char* sep = i ? "," : "";
+    temp += sep + num(hours[i].temp);
+    chance += sep + num(hours[i].chance);
+    rain += sep + num(hours[i].rain);
+    showers += sep + num(hours[i].showers);
+    snow += sep + num(hours[i].snow);
+  }
+  return std::string("{\"latitude\":42.03,\"longitude\":-93.63,\"timezone\":\"America/Chicago\",") +
+         "\"current_units\":{\"time\":\"iso8601\",\"temperature_2m\":\"\\u00b0F\"}," +
+         "\"current\":{\"time\":\"2026-10-12T17:00\",\"interval\":900,\"temperature_2m\":" + now + "}," +
+         "\"hourly_units\":{\"time\":\"iso8601\",\"temperature_2m\":\"\\u00b0F\",\"precipitation_probability\":\"%\"," +
+         "\"rain\":\"inch\",\"showers\":\"inch\",\"snowfall\":\"inch\"}," +
+         "\"hourly\":{\"time\":[\"2026-10-12T00:00\"],\"temperature_2m\":[" + temp +
+         "],\"precipitation_probability\":[" + chance + "],\"rain\":[" + rain + "],\"showers\":[" +
+         showers + "],\"snowfall\":[" + snow + "]}," +
+         "\"daily_units\":{\"time\":\"iso8601\",\"weather_code\":\"wmo code\",\"temperature_2m_max\":\"\\u00b0F\"," +
+         "\"rain_sum\":\"inch\",\"showers_sum\":\"inch\",\"snowfall_sum\":\"inch\"}," +
+         "\"daily\":{\"time\":[\"2026-10-12\"],\"weather_code\":[" + num(code) + "],\"temperature_2m_max\":[" +
+         num(hi) + "],\"temperature_2m_min\":[" + num(lo) + "],\"rain_sum\":[" + num(rainSum) +
+         "],\"showers_sum\":[" + num(showersSum) + "],\"snowfall_sum\":[" + num(snowSum) + "]}}";
+}
+
+static size_t pagesFor(const std::string& json, bool fahrenheit, const char* label,
+                       char pages[][weather::PAGE_LEN]) {
+  weather::Forecast f;
+  if (!weather::parseForecast(json.c_str(), fahrenheit, f)) return 0;
+  return weather::formatPages(f, label, fahrenheit, pages, weather::MAX_PAGES);
+}
 
 static const char* GEOCODE =
     "{\"results\":[{\"id\":5263045,\"name\":\"Milwaukee\",\"latitude\":43.0389,"
@@ -63,48 +86,113 @@ static const char* GEOCODE_ACCENTS =
 static const char* GEOCODE_EMPTY = "{\"generationtime_ms\":0.3}";
 
 int main() {
-  // ---- forecast parsing
-  weather::Forecast f;
-  CHECK(weather::parseForecast(FORECAST, f));
-  CHECK(fabs(f.tempNow - 61.6) < 1e-9);
-  CHECK(f.humidity == 72);
-  CHECK(f.code == 2);
-  CHECK(fabs(f.tempHigh - 66.4) < 1e-9);
-  CHECK(fabs(f.tempLow - -0.6) < 1e-9);
-  CHECK(f.precipChance == 20);
-
-  CHECK(weather::parseForecast(FORECAST_NULLS, f));
-  CHECK(isnan(f.tempNow));
-  CHECK(f.humidity == -1);
-  CHECK(f.precipChance == -1);
-  CHECK(f.code == 95);
-
-  CHECK(!weather::parseForecast("{\"error\":true,\"reason\":\"bad\"}", f));
-  CHECK(!weather::parseForecast("", f));
-  CHECK(!weather::parseForecast("{\"daily\":{\"temperature_2m_max\":[1", f));
-
-  // ---- page formatting
-  weather::parseForecast(FORECAST, f);
   char pages[weather::MAX_PAGES][weather::PAGE_LEN];
-  size_t n = weather::formatPages(f, "MILWAUKEE", true, pages, weather::MAX_PAGES);
-  CHECK(n == 7);
-  CHECK(strcmp(pages[0], "MILWAUKEE") == 0);
-  CHECK(strcmp(pages[1], "PARTLY CLOUDY") == 0);
-  CHECK(strcmp(pages[2], "NOW 62F") == 0);
-  CHECK(strcmp(pages[3], "HIGH 66F") == 0);
-  CHECK(strcmp(pages[4], "LOW -1F") == 0);
-  CHECK(strcmp(pages[5], "HUMIDITY 72%") == 0);
-  CHECK(strcmp(pages[6], "RAIN 20%") == 0);
+  size_t n;
 
-  weather::parseForecast(FORECAST_NULLS, f);
-  n = weather::formatPages(f, "", false, pages, weather::MAX_PAGES);
-  CHECK(n == 3);
-  CHECK(strcmp(pages[0], "THUNDERSTORMS") == 0);
-  CHECK(strcmp(pages[1], "HIGH 30C") == 0);
-  CHECK(strcmp(pages[2], "LOW 22C") == 0);
+  // ---- rainy afternoon: rain screen, no snow screen, no humidity
+  {
+    Hour h[24];
+    for (int i = 0; i < 24; ++i) h[i] = {60, 0, 0, 0, 0};
+    for (int i = 12; i < 18; ++i) h[i] = {58, 40, 0.04, 0.01, 0};
+    std::string json = forecastJson("61.6", 61, 66.4, 50.6, 0.25, 0.05, 0, h, 24);
 
-  n = weather::formatPages(f, "X", true, pages, 2);
-  CHECK(n == 2);
+    weather::Forecast f;
+    CHECK(weather::parseForecast(json.c_str(), true, f));
+    CHECK(fabs(f.tempNow - 61.6) < 1e-9);
+    CHECK(f.code == 61);
+    CHECK(fabs(f.rainInches - 0.30) < 1e-9);
+    CHECK(f.rainChance == 40);
+    CHECK(f.snowChance == -1);
+
+    n = pagesFor(json, true, "AMES", pages);
+    CHECK(n == 4);
+    CHECK(strcmp(pages[0], "AMES") == 0);
+    CHECK(strcmp(pages[1], "LIGHT RAIN") == 0);
+    CHECK(strcmp(pages[2], "NOW 62F  HIGH 66F  LOW 51F") == 0);
+    CHECK(strcmp(pages[3], "RAIN 0.30 IN  40% CHANCE") == 0);
+  }
+
+  // ---- snow day: dry cold hours with a chance count as snow too
+  {
+    Hour h[24];
+    for (int i = 0; i < 24; ++i) h[i] = {20, 0, 0, 0, 0};
+    for (int i = 6; i < 14; ++i) h[i] = {22, 60, 0, 0, 0.3};
+    h[20] = {18, 75, 0, 0, 0};  // no amount forecast, but below freezing
+    std::string json = forecastJson("24", 73, 25, 15, 0, 0, 2.4, h, 24);
+
+    n = pagesFor(json, true, "AMES", pages);
+    CHECK(n == 4);
+    CHECK(strcmp(pages[1], "SNOW") == 0);
+    CHECK(strcmp(pages[2], "NOW 24F  HIGH 25F  LOW 15F") == 0);
+    CHECK(strcmp(pages[3], "SNOW 2.4 IN  75% CHANCE") == 0);
+  }
+
+  // ---- only shown ABOVE 5%: exactly 5% is hidden, 6% is shown
+  {
+    Hour h[24];
+    for (int i = 0; i < 24; ++i) h[i] = {50, 5, 0, 0, 0};
+    std::string json = forecastJson("50", 3, 55, 45, 0, 0, 0, h, 24);
+    n = pagesFor(json, true, "", pages);
+    CHECK(n == 2);  // OVERCAST, temps
+    CHECK(strcmp(pages[0], "OVERCAST") == 0);
+
+    h[9].chance = 6;
+    json = forecastJson("50", 3, 55, 45, 0, 0, 0, h, 24);
+    n = pagesFor(json, true, "", pages);
+    CHECK(n == 3);
+    CHECK(strcmp(pages[2], "RAIN <0.01 IN  6% CHANCE") == 0);
+  }
+
+  // ---- mixed day: both screens, rain first; trace snow
+  {
+    Hour h[24];
+    for (int i = 0; i < 24; ++i) h[i] = {34, 0, 0, 0, 0};
+    for (int i = 0; i < 6; ++i) h[i] = {30, 30, 0, 0, 0.02};
+    for (int i = 12; i < 18; ++i) h[i] = {38, 50, 0.1, 0, 0};
+    std::string json = forecastJson("36", 71, 40, 29, 0.6, 0, 0.04, h, 24);
+    n = pagesFor(json, true, "AMES", pages);
+    CHECK(n == 5);
+    CHECK(strcmp(pages[3], "RAIN 0.60 IN  50% CHANCE") == 0);
+    CHECK(strcmp(pages[4], "SNOW <0.1 IN  30% CHANCE") == 0);
+  }
+
+  // ---- Celsius: freezing point is 0C; amounts stay in inches
+  {
+    Hour h[2] = {{-1, 30, 0, 0, 0}, {3, 10, 0, 0, 0}};
+    std::string json = forecastJson("-0.4", 3, 2, -3, 0, 0, 0, h, 2);
+    n = pagesFor(json, false, "", pages);
+    CHECK(n == 4);
+    CHECK(strcmp(pages[1], "NOW 0C  HIGH 2C  LOW -3C") == 0);
+    CHECK(strcmp(pages[2], "RAIN <0.01 IN  10% CHANCE") == 0);
+    CHECK(strcmp(pages[3], "SNOW <0.1 IN  30% CHANCE") == 0);
+  }
+
+  // ---- nulls: missing current temp and hourly values are skipped
+  {
+    Hour h[3] = {{NAN, NAN, NAN, NAN, NAN}, {70, 0, 0, 0, 0}, {70, NAN, 0, 0, 0}};
+    std::string json = forecastJson("null", 95, 30.2, 21.9, NAN, NAN, NAN, h, 3);
+    n = pagesFor(json, false, "", pages);
+    CHECK(n == 2);
+    CHECK(strcmp(pages[0], "THUNDERSTORMS") == 0);
+    CHECK(strcmp(pages[1], "HIGH 30C  LOW 22C") == 0);
+  }
+
+  // ---- bad responses
+  {
+    weather::Forecast f;
+    CHECK(!weather::parseForecast("{\"error\":true,\"reason\":\"bad\"}", true, f));
+    CHECK(!weather::parseForecast("", true, f));
+    CHECK(!weather::parseForecast("{\"daily\":{\"temperature_2m_max\":[1", true, f));
+  }
+
+  // ---- page limit respected
+  {
+    Hour h[1] = {{40, 50, 0.1, 0, 0}};
+    std::string json = forecastJson("40", 61, 45, 35, 0.1, 0, 0, h, 1);
+    weather::Forecast f;
+    weather::parseForecast(json.c_str(), true, f);
+    CHECK(weather::formatPages(f, "AMES", true, pages, 2) == 2);
+  }
 
   // ---- geocoding
   weather::Place place;
@@ -120,12 +208,17 @@ int main() {
   CHECK(!weather::parsePlace(GEOCODE_EMPTY, place));
 
   // ---- URLs
-  char url[300];
+  char url[512];
   weather::geocodeUrl(url, sizeof(url), "New York");
   CHECK(strstr(url, "&name=New%20York") != nullptr);
-  weather::forecastUrl(url, sizeof(url), 43.0389, -87.90647, true);
+  CHECK(weather::forecastUrl(url, sizeof(url), -42.0308, -193.6319, true));  // longest case
+  CHECK(!weather::forecastUrl(url, 300, -42.0308, -193.6319, true));         // too small
+  CHECK(weather::forecastUrl(url, sizeof(url), 43.0389, -87.90647, true));
   CHECK(strstr(url, "latitude=43.0389&longitude=-87.9065") != nullptr);
   CHECK(strstr(url, "temperature_unit=fahrenheit") != nullptr);
+  CHECK(strstr(url, "precipitation_unit=inch") != nullptr);
+  CHECK(strstr(url, "hourly=temperature_2m,precipitation_probability,rain,showers,snowfall") != nullptr);
+  CHECK(strstr(url, "humidity") == nullptr);
   weather::forecastUrl(url, sizeof(url), 1, 2, false);
   CHECK(strstr(url, "temperature_unit") == nullptr);
 

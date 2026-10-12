@@ -2,9 +2,10 @@
 // sign (PN 1105-2126) over RS-485 using the Alpha sign protocol.
 //
 // Two display modes:
-//   * Weather: joins your home Wi-Fi, pulls today's forecast from Open-Meteo
-//     every 15 minutes and has the sign cycle through condition, current
-//     temperature, high, low, humidity and chance of rain.
+//   * Weather (default, Ames, Iowa): joins your home Wi-Fi, pulls today's
+//     forecast from Open-Meteo every 15 minutes, and scrolls it right to left:
+//     city, conditions, now/high/low, then rain and snow totals with their
+//     chance (only when above 5%).
 //   * Message: shows text you type.
 //
 // Control it from:
@@ -64,8 +65,14 @@ constexpr uint32_t WEATHER_RETRY_MS = 60UL * 1000;        // first retry after a
 constexpr uint32_t WEATHER_STALE_MS = 3UL * 60 * 60 * 1000;  // stop showing data older than this
 constexpr uint32_t WEATHER_RESEND_MS = 60UL * 60 * 1000;     // re-send hourly in case the sign lost power
 
-// About 13 characters fit across 80 columns. Longer pages scroll.
-constexpr size_t SIGN_WIDTH_CHARS = 13;
+// Weather location used until you set another one (/location or the web
+// page). Ames, Iowa.
+const char* DEFAULT_PLACE = "AMES";
+constexpr double DEFAULT_LATITUDE = 42.0308;
+constexpr double DEFAULT_LONGITUDE = -93.6319;
+
+// How weather screens move: "rotate" scrolls each one right to left.
+const char* WEATHER_SCROLL_MODE = "rotate";
 
 constexpr size_t MAX_MESSAGE_LEN = 240;
 
@@ -90,10 +97,10 @@ struct Settings {
   String wifiSsid;
   String wifiPassword;
 
-  bool weatherOn = false;
-  double latitude = NAN;
-  double longitude = NAN;
-  String placeName;
+  bool weatherOn = true;
+  double latitude = DEFAULT_LATITUDE;
+  double longitude = DEFAULT_LONGITUDE;
+  String placeName = DEFAULT_PLACE;
   bool showPlace = true;
   bool fahrenheit = true;
 };
@@ -193,10 +200,10 @@ void loadSettings() {
   settings.message = prefs.getString("message", settings.message);
   settings.wifiSsid = prefs.getString("ssid", DEFAULT_WIFI_SSID);
   settings.wifiPassword = prefs.getString("wifipass", DEFAULT_WIFI_PASSWORD);
-  settings.weatherOn = prefs.getBool("weather", false);
-  settings.latitude = prefs.getDouble("lat", NAN);
-  settings.longitude = prefs.getDouble("lon", NAN);
-  settings.placeName = prefs.getString("place", "");
+  settings.weatherOn = prefs.getBool("weather", settings.weatherOn);
+  settings.latitude = prefs.getDouble("lat", settings.latitude);
+  settings.longitude = prefs.getDouble("lon", settings.longitude);
+  settings.placeName = prefs.getString("place", settings.placeName);
   settings.showPlace = prefs.getBool("showplace", true);
   settings.fahrenheit = prefs.getBool("fahrenheit", true);
   if (settings.text.mode >= (int)alpha::MODE_COUNT) settings.text.mode = 0;
@@ -287,14 +294,17 @@ bool fetchWeather() {
     lastWeatherError = "no location set";
     return false;
   }
-  char url[320];
-  weather::forecastUrl(url, sizeof(url), settings.latitude, settings.longitude, settings.fahrenheit);
+  char url[512];
+  if (!weather::forecastUrl(url, sizeof(url), settings.latitude, settings.longitude, settings.fahrenheit)) {
+    lastWeatherError = "URL too long";
+    return false;
+  }
   String body;
   String error;
   weather::Forecast f;
   if (!httpGet(url, body, error)) {
     lastWeatherError = error;
-  } else if (!weather::parseForecast(body.c_str(), f)) {
+  } else if (!weather::parseForecast(body.c_str(), settings.fahrenheit, f)) {
     lastWeatherError = "unexpected response";
   } else {
     forecast = f;
@@ -344,12 +354,11 @@ void showWeather(bool force = false) {
                                  weather::MAX_PAGES);
   }
 
-  // Short pages hold still; anything wider than the sign scrolls.
+  // Every screen scrolls right to left, one after another.
   alpha::Page pages[weather::MAX_PAGES];
   String summary;
   for (size_t i = 0; i < count; ++i) {
-    bool fits = strlen(lines[i]) <= SIGN_WIDTH_CHARS;
-    pages[i] = {lines[i], alpha::findMode(fits ? "hold" : "rotate")};
+    pages[i] = {lines[i], alpha::findMode(WEATHER_SCROLL_MODE)};
     summary += (i ? " | " : "") + String(lines[i]);
   }
 
