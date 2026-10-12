@@ -5,7 +5,8 @@
 //   * Weather (default, Ames, Iowa): joins your home Wi-Fi, pulls today's
 //     forecast from Open-Meteo every 15 minutes, and scrolls it right to left:
 //     city, conditions, now/high/low, then precipitation type, amount and
-//     chance on one screen (only when the chance is above 5%).
+//     chance on one screen when the chance is above 5%, otherwise how
+//     cloudy the sky is.
 //   * Message: shows text you type.
 //
 // Control it from:

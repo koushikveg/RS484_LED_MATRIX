@@ -192,7 +192,8 @@ unit, connect it to the same A/B wires, type `/sniff`, and capture what it sends
 | City | `AMES` | Always (turn off with `/showplace off`) |
 | Today's conditions | `PARTLY CLOUDY` | Always |
 | Temperatures | `NOW 62F  HIGH 66F  LOW 51F` | Always |
-| Precipitation: type, amount and chance on one screen | `RAIN 0.30 IN  40% CHANCE` | Only when today's chance of precipitation is **above 5%** |
+| Precipitation: type, amount and chance on one screen | `RAIN 0.30 IN  40% CHANCE` | When today's chance of precipitation is **above 5%** |
+| Clouds: how cloudy the sky is | `MOSTLY CLOUDY  70% CLOUD COVER` | Instead of precipitation, when the chance is **5% or less** |
 
 - Every screen scrolls right to left. To change that, set `WEATHER_SCROLL_MODE`
   at the top of `led_sign.ino` to another mode from `/help`, e.g. `"hold"`.
@@ -215,6 +216,16 @@ unit, connect it to the same A/B wires, type `/sniff`, and capture what it sends
 - **Amounts** are today's forecast totals in **inches**, even with
   `/units c`. Amounts too small to show read `<0.01 IN` (rain) or `<0.1 IN`
   (snow).
+- **Cloud cover** is today's average of Open-Meteo's hourly cloud cover. The
+  wording follows the National Weather Service's sky-condition bands:
+
+  | Cloud cover | Shown as |
+  |---|---|
+  | 0–12% | `CLEAR` |
+  | 13–37% | `MOSTLY CLEAR` |
+  | 38–62% | `PARTLY CLOUDY` |
+  | 63–87% | `MOSTLY CLOUDY` |
+  | 88–100% | `CLOUDY` |
 
 The ESP32 sends all the screens to the sign as one multi-page message, so the
 sign does the cycling itself. The sign is only rewritten when the forecast

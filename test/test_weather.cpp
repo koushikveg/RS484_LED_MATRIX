@@ -33,9 +33,18 @@ static std::string num(double v) {
   return b;
 }
 
+// `clouds` is the hourly cloud_cover array contents, e.g. "60,80,null";
+// nullptr leaves the hourly section out.
 static std::string forecastJson(const char* now, int code, double hi, double lo, double rainSum,
-                                double showersSum, double snowSum, double chance) {
-  return std::string("{\"latitude\":42.03,\"longitude\":-93.63,\"timezone\":\"America/Chicago\",") +
+                                double showersSum, double snowSum, double chance,
+                                const char* clouds = nullptr) {
+  std::string hourly;
+  if (clouds) {
+    hourly = std::string("\"hourly_units\":{\"time\":\"iso8601\",\"cloud_cover\":\"%\"},") +
+             "\"hourly\":{\"time\":[\"2026-10-12T00:00\",\"2026-10-12T01:00\"],\"cloud_cover\":[" +
+             clouds + "]},";
+  }
+  return std::string("{\"latitude\":42.03,\"longitude\":-93.63,\"timezone\":\"America/Chicago\",") + hourly +
          "\"current_units\":{\"time\":\"iso8601\",\"temperature_2m\":\"\\u00b0F\"}," +
          "\"current\":{\"time\":\"2026-10-12T17:00\",\"interval\":900,\"temperature_2m\":" + now + "}," +
          "\"daily_units\":{\"time\":\"iso8601\",\"weather_code\":\"wmo code\",\"temperature_2m_max\":\"\\u00b0F\"," +
@@ -54,13 +63,24 @@ static size_t pagesFor(const std::string& json, bool fahrenheit, const char* lab
   return weather::formatPages(f, label, fahrenheit, pages, weather::MAX_PAGES);
 }
 
-// Just the precipitation screen ("" if none).
-static std::string precipFor(int code, double rain, double showers, double snow, double chance) {
+// The screen after the temperatures (precipitation or clouds), "" if none.
+static std::string lastScreenFor(int code, double rain, double showers, double snow, double chance,
+                                 const char* clouds = nullptr) {
   char pages[weather::MAX_PAGES][weather::PAGE_LEN];
-  size_t n = pagesFor(forecastJson("50", code, 55, 45, rain, showers, snow, chance), true, "", pages);
-  for (size_t i = 0; i < n; ++i)
-    if (strstr(pages[i], "CHANCE")) return pages[i];
+  size_t n = pagesFor(forecastJson("50", code, 55, 45, rain, showers, snow, chance, clouds), true, "", pages);
+  for (size_t i = 0; i + 1 < n; ++i)
+    if (strncmp(pages[i], "NOW ", 4) == 0) return pages[i + 1];
   return "";
+}
+
+static std::string precipFor(int code, double rain, double showers, double snow, double chance) {
+  return lastScreenFor(code, rain, showers, snow, chance);
+}
+
+static std::string cloudsFor(int cover) {
+  char clouds[16];
+  snprintf(clouds, sizeof(clouds), "%d", cover);
+  return lastScreenFor(3, 0, 0, 0, 0, clouds);
 }
 
 static const char* GEOCODE =
@@ -115,6 +135,34 @@ int main() {
   CHECK(precipFor(61, 0.01, 0, 0, 5) == "");
   CHECK(precipFor(61, 0.01, 0, 0, 6) == "RAIN 0.01 IN  6% CHANCE");
   CHECK(precipFor(61, 0.2, 0, 0, NAN) == "");  // unknown chance: hidden
+
+  // ---- 5% or less: how cloudy the sky is instead
+  {
+    std::string json = forecastJson("48", 2, 52, 40, 0, 0, 0, 5, "60,80,null,72");
+    weather::Forecast f;
+    CHECK(weather::parseForecast(json.c_str(), f));
+    CHECK(f.cloudCover == 71);  // (60 + 80 + 72) / 3, null skipped
+    n = pagesFor(json, true, "AMES", pages);
+    CHECK(n == 4);
+    CHECK(strcmp(pages[2], "NOW 48F  HIGH 52F  LOW 40F") == 0);
+    CHECK(strcmp(pages[3], "MOSTLY CLOUDY  71% CLOUD COVER") == 0);
+  }
+  CHECK(lastScreenFor(61, 0.2, 0, 0, 6, "90") == "RAIN 0.20 IN  6% CHANCE");  // rain wins above 5%
+  CHECK(lastScreenFor(1, 0, 0, 0, NAN, "20") == "MOSTLY CLEAR  20% CLOUD COVER");  // unknown chance
+  CHECK(lastScreenFor(1, 0, 0, 0, 0, "null,null") == "");  // no cloud data: no screen
+  CHECK(lastScreenFor(1, 0, 0, 0, 0, "") == "");
+
+  // ---- NWS sky-condition bands
+  CHECK(cloudsFor(0) == "CLEAR  0% CLOUD COVER");
+  CHECK(cloudsFor(12) == "CLEAR  12% CLOUD COVER");
+  CHECK(cloudsFor(13) == "MOSTLY CLEAR  13% CLOUD COVER");
+  CHECK(cloudsFor(37) == "MOSTLY CLEAR  37% CLOUD COVER");
+  CHECK(cloudsFor(38) == "PARTLY CLOUDY  38% CLOUD COVER");
+  CHECK(cloudsFor(62) == "PARTLY CLOUDY  62% CLOUD COVER");
+  CHECK(cloudsFor(63) == "MOSTLY CLOUDY  63% CLOUD COVER");
+  CHECK(cloudsFor(87) == "MOSTLY CLOUDY  87% CLOUD COVER");
+  CHECK(cloudsFor(88) == "CLOUDY  88% CLOUD COVER");
+  CHECK(cloudsFor(100) == "CLOUDY  100% CLOUD COVER");
 
   // ---- longest screen fits
   CHECK(precipFor(67, 12.34, 0, 25.5, 100) == "FREEZING RAIN 12.34 IN + SNOW 25.5 IN  100% CHANCE");
@@ -176,6 +224,7 @@ int main() {
   CHECK(strstr(url, "temperature_unit=fahrenheit") != nullptr);
   CHECK(strstr(url, "precipitation_unit=inch") != nullptr);
   CHECK(strstr(url, "rain_sum,showers_sum,snowfall_sum,precipitation_probability_max") != nullptr);
+  CHECK(strstr(url, "&hourly=cloud_cover") != nullptr);
   CHECK(strstr(url, "humidity") == nullptr);
   weather::forecastUrl(url, sizeof(url), 1, 2, false);
   CHECK(strstr(url, "temperature_unit") == nullptr);

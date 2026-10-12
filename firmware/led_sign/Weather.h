@@ -28,6 +28,7 @@ struct Forecast {
   double rainInches = 0;   // today's rain + showers total
   double snowInches = 0;   // today's snowfall total
   int precipChance = -1;   // %, today's highest chance of any precipitation, -1 = unknown
+  int cloudCover = -1;     // %, today's average cloud cover, -1 = unknown
 };
 
 // The precipitation screen only appears when the chance is above this (percent).
@@ -49,6 +50,7 @@ inline bool forecastUrl(char* out, size_t cap, double lat, double lon, bool fahr
                      "&current=temperature_2m"
                      "&daily=weather_code,temperature_2m_max,temperature_2m_min,"
                      "rain_sum,showers_sum,snowfall_sum,precipitation_probability_max"
+                     "&hourly=cloud_cover"
                      "&timezone=auto&forecast_days=1&precipitation_unit=inch%s",
                      lat, lon, fahrenheit ? "&temperature_unit=fahrenheit" : "");
   return len > 0 && (size_t)len < cap;
@@ -134,6 +136,34 @@ inline bool number(const char* begin, const char* end, const char* key, double& 
   return true;
 }
 
+// Averages the numeric array under `key`, skipping JSON nulls. Returns false
+// if there are no values.
+inline bool average(const char* begin, const char* end, const char* key, double& out) {
+  const char* v = findKey(begin, end, key);
+  if (!v || *v != '[') return false;
+  const char* close = matchBracket(v, end);
+  if (!close) return false;
+  double sum = 0;
+  int count = 0;
+  for (const char* p = v + 1; p < close;) {
+    while (p < close && (*p == ' ' || *p == ',')) ++p;
+    if (p >= close || *p == ']') break;
+    if (strncmp(p, "null", 4) == 0) {
+      p += 4;
+      continue;
+    }
+    char* stop = nullptr;
+    double d = strtod(p, &stop);
+    if (stop == p) return false;
+    sum += d;
+    ++count;
+    p = stop;
+  }
+  if (count == 0) return false;
+  out = sum / count;
+  return true;
+}
+
 // Reads a string under `key` into `out`, upper-cased and reduced to ASCII
 // (the sign can't show other characters). Returns false if missing.
 inline bool text(const char* begin, const char* end, const char* key, char* out, size_t cap) {
@@ -180,6 +210,11 @@ inline bool parseForecast(const char* json, Forecast& f) {
   if (number(db, de, "showers_sum", v) && !isnan(v)) f.rainInches += v;
   if (number(db, de, "snowfall_sum", v) && !isnan(v)) f.snowInches = v;
   if (number(db, de, "precipitation_probability_max", v)) f.precipChance = (int)lround(v);
+
+  // Hourly cloud cover for today (local midnight to midnight), averaged.
+  const char* hb = json;
+  const char* he = end;
+  if (section(hb, he, "hourly") && average(hb, he, "cloud_cover", v)) f.cloudCover = (int)lround(v);
   return !isnan(f.tempHigh) && !isnan(f.tempLow);
 }
 
@@ -295,10 +330,24 @@ inline bool formatPrecip(const Forecast& f, char* out, size_t cap) {
   return true;
 }
 
+// Describes cloud cover using the National Weather Service's sky-condition
+// bands, e.g. "MOSTLY CLOUDY  70% CLOUD COVER". Returns false if unknown.
+inline bool formatClouds(const Forecast& f, char* out, size_t cap) {
+  if (f.cloudCover < 0) return false;
+  int c = f.cloudCover;
+  const char* sky = c <= 12   ? "CLEAR"
+                    : c <= 37 ? "MOSTLY CLEAR"
+                    : c <= 62 ? "PARTLY CLOUDY"
+                    : c <= 87 ? "MOSTLY CLOUDY"
+                              : "CLOUDY";
+  snprintf(out, cap, "%s  %d%% CLOUD COVER", sky, c);
+  return true;
+}
+
 // Turns a forecast into the screens shown on the sign, in order:
 //   AMES  ->  PARTLY CLOUDY  ->  NOW 62F  HIGH 66F  LOW 51F  ->  RAIN 0.30 IN  40% CHANCE
-// The precipitation screen only appears when the chance is above
-// MIN_PRECIP_CHANCE. The sign has no degree symbol, so temperatures read
+// The last screen is precipitation when its chance is above
+// MIN_PRECIP_CHANCE, otherwise how cloudy the sky is. The sign has no degree symbol, so temperatures read
 // like "66F". Returns the number of screens written.
 inline size_t formatPages(const Forecast& f, const char* label, bool fahrenheit,
                           char pages[][PAGE_LEN], size_t maxPages) {
@@ -320,7 +369,7 @@ inline size_t formatPages(const Forecast& f, const char* label, bool fahrenheit,
   while (len > 0 && len <= sizeof(temps) && temps[len - 1] == ' ') temps[--len] = '\0';
   if (len && n < maxPages) snprintf(pages[n++], PAGE_LEN, "%s", temps);
 
-  if (n < maxPages && formatPrecip(f, pages[n], PAGE_LEN)) ++n;
+  if (n < maxPages && (formatPrecip(f, pages[n], PAGE_LEN) || formatClouds(f, pages[n], PAGE_LEN))) ++n;
   return n;
 }
 
