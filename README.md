@@ -5,10 +5,11 @@ ESP32 firmware for driving an **Adaptive Micro Systems 80×7 transit sign**
 
 It has two display modes:
 
-- **Weather:** the ESP32 joins your home Wi-Fi, pulls today's forecast for your
-  city from [Open-Meteo](https://open-meteo.com) (free, no API key) every 15
-  minutes, and the sign cycles through it:
-  `MILWAUKEE` → `PARTLY CLOUDY` → `NOW 62F` → `HIGH 66F` → `LOW 51F` → `HUMIDITY 72%` → `RAIN 20%`
+- **Weather (default, set to Ames, Iowa):** the ESP32 joins your home Wi-Fi,
+  pulls today's forecast from [Open-Meteo](https://open-meteo.com) (free, no
+  API key) every 15 minutes, and the sign scrolls it right to left, one screen
+  after another:
+  `AMES` → `PARTLY CLOUDY` → `NOW 62F  HIGH 66F  LOW 51F` → `SNOW 1.2 IN  40% CHANCE`
 - **Message:** shows any text you type.
 
 You can control it from the USB Serial Monitor, from a web page
@@ -45,10 +46,8 @@ Look for a label on the sign or cable, or tell me what you see.
 
 | Part | Notes |
 |---|---|
-| ESP32 dev board | Any ESP32 / ESP32-S3 board. On an ESP32-C3, change the RX/TX pins. |
-| RS-485 transceiver, **3.3 V** | MAX3485 / SP3485 module. Avoid 5 V MAX485 modules: their RO output would put 5 V on an ESP32 pin. |
+| **ESP32-S3 RS485/CAN board** | Waveshare ESP32-S3-RS485-CAN, also sold as KLAYERS. It has an isolated RS-485 transceiver built in and runs on 7–36 V, so it can share the sign's 12 V supply. The firmware defaults are for this board. |
 | 12 V power supply, ≥ 5 A | The sign draws about 36 W (3 A at 12 V). It accepts 9–26 V DC. |
-| 12 V → 5 V buck converter | Powers the ESP32 from the same supply (or use USB while testing). |
 | Mating connector | The sign's 1 ft pigtail ends in an AMP Mate-N-Lok 6-pin cap (350781-1). It mates with a 6-pin Mate-N-Lok plug (e.g. TE 350715-1 + socket contacts). Check this against your cable, or cut the pigtail and splice it. |
 | 5 A inline fuse | On the +12 V feed. |
 
@@ -58,34 +57,54 @@ Sign connector pinout (from the sign datasheet):
 
 | Pin | Wire | Function | Connect to |
 |---|---|---|---|
-| 1 | Black 16 AWG | Power ground | Supply **−** and ESP32/transceiver **GND** |
+| 1 | Black 16 AWG | Power ground | Supply **−**, board power **GND**, and board RS-485 **GND** |
 | 2 | — | No connect | — |
-| 3 | Black 20 AWG | J1708A (RS-485 **A / +**) | Transceiver **A** |
+| 3 | Black 20 AWG | J1708A (RS-485 **A / +**) | Board RS-485 **A** |
 | 4 | Red 16 AWG | +12 V unswitched | Supply **+** (via fuse) |
 | 5 | Orange 16 AWG | +12 V switched (ignition) | Supply **+** (via fuse). The sign stays off without it. |
-| 6 | White 20 AWG | J1708B (RS-485 **B / −**) | Transceiver **B** |
+| 6 | White 20 AWG | J1708B (RS-485 **B / −**) | Board RS-485 **B** |
 
 ```
-                 +12V ──[5A fuse]──┬──────────────► sign pin 4 (red)
-                                   ├──────────────► sign pin 5 (orange)
-                                   └──► buck 12V→5V ──► ESP32 5V/VIN
-                  GND ─────────────┬──────────────► sign pin 1 (black, 16 AWG)
-                                   ├──► buck GND
-                                   └──► ESP32 GND ─── transceiver GND
+   12 V supply                                 Sign
+   + ──[5A fuse]──┬──────────────────────────► pin 4 (red)
+                  ├──────────────────────────► pin 5 (orange)
+                  └──► board power in (7-36V)
+   − ─────────────┬──────────────────────────► pin 1 (black, 16 AWG)
+                  └──► board power GND
 
-   ESP32                 MAX3485 module               Sign
-   3V3      ───────────► VCC
-   GPIO17 (TX) ────────► DI
-   GPIO16 (RX) ◄──────── RO
-   GPIO4    ───────────► DE + RE (tied)
-                         A  ───────────────────────► pin 3 (black, 20 AWG)
-                         B  ───────────────────────► pin 6 (white)
+   ESP32-S3 RS485/CAN board
+   RS485 A   ────────────────────────────────► pin 3 (black, 20 AWG)
+   RS485 B   ────────────────────────────────► pin 6 (white)
+   RS485 GND ────────────────────────────────► pin 1 (ground)
 ```
 
-- **Grounds must be common.** The ESP32/transceiver ground has to connect to sign pin 1, or the RS-485 lines float.
-- If your transceiver module switches direction automatically (no DE/RE pins), set `RS485_DE_PIN = -1` in `led_sign.ino`.
-- A 120 Ω terminating resistor isn't needed for the 1–2 m cable used here.
+- **Connect the RS-485 GND terminal too.** The board's RS-485 port is
+  isolated from the rest of the board, so its ground is separate from the
+  power ground. Without a ground reference to the sign, the A/B signals float.
+- The board has a 120 Ω termination resistor that's **off by default**
+  (jumper). Leave it off; the cable to the sign is short.
 - Vendors label A/B inconsistently. If nothing shows up, **swap A and B** first.
+- While testing on the bench you can power the board from USB-C alone. The
+  sign still needs its own 12 V.
+
+The board's RS-485 transceiver is wired to TX = GPIO17, RX = GPIO18, and a
+driver-enable line on GPIO21, which the firmware raises while sending. These
+come from community configs for the Waveshare board and haven't been checked
+against a KLAYERS unit. If `/probe` shows nothing even after swapping A/B,
+compare the pin table in the board's manual with the top of `led_sign.ino`.
+
+### Using a plain ESP32 and a separate RS-485 module instead
+
+Edit the pin settings at the top of `led_sign.ino`:
+
+| Module | Wiring | Settings |
+|---|---|---|
+| Auto-direction (DIYables RS485-TTL etc.: VCC, GND, RXD, TXD) | ESP32 TX(17) → module **RXD**, module **TXD** → ESP32 RX(16), VCC to **3.3 V** | `RX=16, TX=17, DE=-1` |
+| MAX3485 / SP3485 (DI, RO, DE, RE) | TX(17) → DI, RO → RX(16), DE+RE tied → GPIO4, VCC to 3.3 V | `RX=16, TX=17, DE=4` |
+
+Power a separate module from 3.3 V (a 5 V module would send 5 V back into an
+ESP32 pin). Its A/B/GND go to sign pins 3/6/1, and the ESP32 needs a 12 V → 5 V
+buck converter or USB for power.
 
 ## Building and flashing
 
@@ -93,13 +112,20 @@ Sign connector pinout (from the sign datasheet):
 
 1. Install the ESP32 board package: *Boards Manager → "esp32" by Espressif*.
 2. Open `firmware/led_sign/led_sign.ino`.
-3. Select your board (e.g. *ESP32 Dev Module*) and port, then upload.
-4. Open the Serial Monitor at **115200** baud with line ending **Newline**.
+3. Board: **ESP32S3 Dev Module**. Under *Tools*, set **USB CDC On Boot → Enabled**.
+   Without that, Serial Monitor output goes to the board's internal UART instead
+   of the USB-C port.
+4. Pick the port, upload, and open the Serial Monitor at **115200** baud with
+   line ending **Newline**.
+
+If the upload doesn't start, hold **BOOT**, tap **RESET**, release **BOOT**, and
+upload again. Press **RESET** afterwards to run the new firmware.
 
 **PlatformIO**
 
 ```sh
-pio run -t upload && pio device monitor
+pio run -t upload && pio device monitor          # ESP32-S3 RS485/CAN board
+pio run -e esp32dev -t upload                    # plain ESP32 + separate module
 ```
 
 Pins, the fallback access point and timing settings are at the top of
@@ -126,41 +152,152 @@ If the sign still shows nothing, it may have been configured for a transit
 J1708/J1587 protocol instead of Alpha. If you have the vehicle's original head
 unit, connect it to the same A/B wires, type `/sniff`, and capture what it sends.
 
+## Connecting to Wi-Fi
+
+The ESP32 needs your home Wi-Fi to download the weather. You enter the
+network name and password **once, on the ESP32 itself**. They're saved in its
+flash memory and survive power cycles and firmware updates (unless you turn on
+*Tools → Erase All Flash Before Sketch Upload*). They are never stored in this
+repository.
+
+The ESP32-S3 only connects to **2.4 GHz** Wi-Fi. If your router has
+separate 2.4 GHz and 5 GHz networks, use the 2.4 GHz one. A single name for
+both bands usually works.
+
+### Option A: Serial Monitor (USB)
+
+1. Plug the board into your computer with USB-C and open the Arduino IDE
+   Serial Monitor.
+2. Set the baud rate to **115200** and the line ending to **Newline**
+   (the two drop-downs in the Serial Monitor).
+3. Type each line and press Enter, using your network's name and password:
+   ```
+   /ssid YourNetworkName
+   /pass YourWiFiPassword
+   ```
+   Both are case-sensitive and can contain spaces.
+4. Within a few seconds it should print:
+   ```
+   Wi-Fi connected: http://ledsign.local or http://192.168.1.42
+   ```
+   (your IP address will differ). Weather starts downloading straight away.
+
+### Option B: from your phone (no USB needed)
+
+1. Power the board. If it has no saved network, or can't reach the saved one
+   for 20 seconds, it starts its own Wi-Fi network.
+2. On your phone, join **`LED-Sign`** (password **`ledsign123`**).
+3. Open **http://192.168.4.1** in the browser.
+4. Under **Home Wi-Fi**, enter your network name and password and tap
+   **Save and connect**.
+5. Rejoin your normal Wi-Fi. The `LED-Sign` network turns itself off once
+   the ESP32 is connected to your home network.
+
+### Checking it worked
+
+- Type `/status` in the Serial Monitor. The `wifi` line shows the network
+  and the ESP32's IP address, and `weather` shows when it last updated.
+- On a phone or computer on the same network, open **http://ledsign.local**.
+  Some Android phones don't support `.local` addresses; use the IP address
+  from `/status` instead.
+- Once the weather downloads, the sign starts scrolling the Ames forecast.
+
+### Changing networks later
+
+Run `/ssid` and `/pass` again, or use the **Home Wi-Fi** form on the web page.
+The new values replace the old ones. On the web page, leave the password
+blank to keep the saved one.
+
+### Building your Wi-Fi into the firmware (optional)
+
+You can also put the network name and password in `DEFAULT_WIFI_SSID` and
+`DEFAULT_WIFI_PASSWORD` at the top of `led_sign.ino` before flashing. They're
+used until a network is saved with `/ssid`/`/pass` or the web page. **Don't
+commit or push that change:** anything committed ends up on GitHub, where a
+public repository would expose your Wi-Fi password.
+
+### If it won't connect
+
+| Symptom | Fix |
+|---|---|
+| `/status` says `not connected` | Re-enter the name and password; check capitals and spaces. |
+| Still not connecting | Make sure the network is 2.4 GHz and the board is in range. |
+| Nothing prints in the Serial Monitor | In the Arduino IDE set **Tools → USB CDC On Boot → Enabled** and re-flash; check the baud rate is 115200. |
+| Commands do nothing | Set the Serial Monitor line ending to **Newline**. |
+| `ledsign.local` doesn't open | Use the IP address from `/status`. |
+| `LED-Sign` network doesn't appear | It only appears when home Wi-Fi isn't connected; wait 20 s after power-up. |
+
+The Wi-Fi password is stored unencrypted in the ESP32's flash. It's never
+shown on the web page or in `/status`.
+
 ## Setting up weather
 
-1. **Connect to your home Wi-Fi.** In the Serial Monitor type:
-   ```
-   /ssid MyHomeNetwork
-   /pass my-wifi-password
-   ```
-   The ESP32 prints its address once connected, e.g.
-   `Wi-Fi connected: http://ledsign.local or http://192.168.1.42`.
-   The ESP32 only supports **2.4 GHz** Wi-Fi.
+1. **Wi-Fi:** connect it first (see [Connecting to Wi-Fi](#connecting-to-wi-fi)).
 
-   *No USB handy?* With no saved network (or if it can't connect for 20 s), the
-   ESP32 starts its own Wi-Fi network **`LED-Sign`** (password `ledsign123`).
-   Join it, open **http://192.168.4.1**, and fill in *Home Wi-Fi*.
-
-2. **Set your location:**
+2. **Location:** it's preset to **Ames, Iowa** (42.0308, −93.6319, shown as
+   `AMES`), so there's nothing to do. To change it, use a city name:
    ```
-   /location Milwaukee
+   /location Des Moines
    ```
-   Use only the city name. Open-Meteo's search doesn't understand "Milwaukee, WI". If it
+   Use only the city name. Open-Meteo's search doesn't understand "Des Moines, IA". If it
    picks the wrong place, use coordinates instead (right-click a spot in Google
    Maps to copy them). The optional label is what the sign shows:
    ```
-   /latlon 43.0389 -87.9065 HOME
+   /latlon 42.0308 -93.6319 AMES
    ```
    Setting a location switches the sign to weather mode and fetches right away.
+   To change the built-in default, edit `DEFAULT_PLACE`, `DEFAULT_LATITUDE` and
+   `DEFAULT_LONGITUDE` at the top of `led_sign.ino`.
 
 3. **Optional:** `/units c` for Celsius, `/showplace off` to drop the city
    name from the cycle.
 
-The ESP32 sends the whole cycle to the sign as one multi-page message, so the
-sign does the cycling itself. Pages that fit (about 13 characters) hold still;
-longer ones scroll. The sign is only rewritten when the numbers change, plus
-once an hour in case the sign was power cycled on its own. If updates fail for
-3 hours the sign shows `WEATHER OFFLINE` instead of old data.
+### What the sign shows
+
+| Screen | Example | When |
+|---|---|---|
+| City | `AMES` | Always (turn off with `/showplace off`) |
+| Today's conditions | `PARTLY CLOUDY` | Always |
+| Temperatures | `NOW 62F  HIGH 66F  LOW 51F` | Always |
+| Precipitation: type, amount and chance on one screen | `RAIN 0.30 IN  40% CHANCE` | When today's chance of precipitation is **above 5%** |
+| Clouds: how cloudy the sky is | `MOSTLY CLOUDY  70% CLOUD COVER` | Instead of precipitation, when the chance is **5% or less** |
+
+- Every screen scrolls right to left. To change that, set `WEATHER_SCROLL_MODE`
+  at the top of `led_sign.ino` to another mode from `/help`, e.g. `"hold"`.
+  (`/mode` only affects typed messages.)
+- **Type** comes from Open-Meteo's forecast for today: whichever of rain
+  (including showers) and snowfall has an amount forecast. If neither has an
+  amount, today's weather code decides. The precipitation screen can read:
+
+  | Forecast | Screen |
+  |---|---|
+  | Rain only | `RAIN 0.30 IN  40% CHANCE` |
+  | Snow only | `SNOW 1.2 IN  40% CHANCE` |
+  | Both | `RAIN 0.10 IN + SNOW 0.5 IN  60% CHANCE` |
+  | Freezing rain (weather code) | `FREEZING RAIN 0.05 IN  30% CHANCE` |
+  | A chance but no type forecast | `PRECIP <0.01 IN  20% CHANCE` |
+
+- **Chance** is today's highest chance of any precipitation. Open-Meteo
+  doesn't give separate rain and snow chances, so on a mixed day the one
+  percentage covers both.
+- **Amounts** are today's forecast totals in **inches**, even with
+  `/units c`. Amounts too small to show read `<0.01 IN` (rain) or `<0.1 IN`
+  (snow).
+- **Cloud cover** is today's average of Open-Meteo's hourly cloud cover. The
+  wording follows the National Weather Service's sky-condition bands:
+
+  | Cloud cover | Shown as |
+  |---|---|
+  | 0–12% | `CLEAR` |
+  | 13–37% | `MOSTLY CLEAR` |
+  | 38–62% | `PARTLY CLOUDY` |
+  | 63–87% | `MOSTLY CLOUDY` |
+  | 88–100% | `CLOUDY` |
+
+The ESP32 sends all the screens to the sign as one multi-page message, so the
+sign does the cycling itself. The sign is only rewritten when the forecast
+changes, plus once an hour in case the sign was power cycled on its own. If
+updates fail for 3 hours the sign shows `WEATHER OFFLINE` instead of old data.
 
 Typing a message switches to message mode. `/weather on` switches back.
 
@@ -173,7 +310,7 @@ Type any text and press Enter to display it (this turns weather off). Commands:
 | Command | Effect |
 |---|---|
 | `/ssid <name>`, `/pass <password>` | Home Wi-Fi network and password (saved; reconnects) |
-| `/location <city>` | Look up a city and show its weather |
+| `/location <city>` | Look up a city and show its weather (default: Ames, Iowa) |
 | `/latlon <lat> <lon> [label]` | Set the weather location by coordinates |
 | `/units f\|c` | Fahrenheit or Celsius |
 | `/showplace on\|off` | Include the city name in the cycle |

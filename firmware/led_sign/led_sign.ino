@@ -2,9 +2,11 @@
 // sign (PN 1105-2126) over RS-485 using the Alpha sign protocol.
 //
 // Two display modes:
-//   * Weather: joins your home Wi-Fi, pulls today's forecast from Open-Meteo
-//     every 15 minutes and has the sign cycle through condition, current
-//     temperature, high, low, humidity and chance of rain.
+//   * Weather (default, Ames, Iowa): joins your home Wi-Fi, pulls today's
+//     forecast from Open-Meteo every 15 minutes, and scrolls it right to left:
+//     city, conditions, now/high/low, then precipitation type, amount and
+//     chance on one screen when the chance is above 5%, otherwise how
+//     cloudy the sky is.
 //   * Message: shows text you type.
 //
 // Control it from:
@@ -30,11 +32,19 @@
 
 // ---------------------------------------------------------------- configuration
 
-// RS-485 transceiver pins. GPIO 16/17 are fine on ESP32 and ESP32-S3.
-// On an ESP32-C3 pick other pins (16/17 are used by the flash there).
-constexpr int RS485_RX_PIN = 16;  // transceiver RO
-constexpr int RS485_TX_PIN = 17;  // transceiver DI
-constexpr int RS485_DE_PIN = 4;   // transceiver DE + /RE tied together; -1 for auto-direction modules
+// RS-485 transceiver pins.
+//
+// Default: ESP32-S3 RS485/CAN board (Waveshare ESP32-S3-RS485-CAN, also sold
+// as KLAYERS). The transceiver is on the board: TX = GPIO17, RX = GPIO18,
+// and GPIO21 enables the driver (HIGH = send, LOW = receive).
+//
+// Separate module on a plain ESP32 instead:
+//   * Auto-direction module (DIYables RS485-TTL etc., pins VCC GND RXD TXD):
+//     RX = 16 (module TXD), TX = 17 (module RXD), DE = -1.
+//   * MAX3485-style module: RX = RO, TX = DI, DE = the GPIO wired to DE+RE.
+constexpr int RS485_RX_PIN = 18;
+constexpr int RS485_TX_PIN = 17;
+constexpr int RS485_DE_PIN = 21;  // -1 if the transceiver switches direction itself
 
 // Home Wi-Fi. You can leave these blank and set them later with /ssid and
 // /pass (or from the web page); saved values take priority over these.
@@ -56,8 +66,14 @@ constexpr uint32_t WEATHER_RETRY_MS = 60UL * 1000;        // first retry after a
 constexpr uint32_t WEATHER_STALE_MS = 3UL * 60 * 60 * 1000;  // stop showing data older than this
 constexpr uint32_t WEATHER_RESEND_MS = 60UL * 60 * 1000;     // re-send hourly in case the sign lost power
 
-// About 13 characters fit across 80 columns. Longer pages scroll.
-constexpr size_t SIGN_WIDTH_CHARS = 13;
+// Weather location used until you set another one (/location or the web
+// page). Ames, Iowa.
+const char* DEFAULT_PLACE = "AMES";
+constexpr double DEFAULT_LATITUDE = 42.0308;
+constexpr double DEFAULT_LONGITUDE = -93.6319;
+
+// How weather screens move: "rotate" scrolls each one right to left.
+const char* WEATHER_SCROLL_MODE = "rotate";
 
 constexpr size_t MAX_MESSAGE_LEN = 240;
 
@@ -82,10 +98,10 @@ struct Settings {
   String wifiSsid;
   String wifiPassword;
 
-  bool weatherOn = false;
-  double latitude = NAN;
-  double longitude = NAN;
-  String placeName;
+  bool weatherOn = true;
+  double latitude = DEFAULT_LATITUDE;
+  double longitude = DEFAULT_LONGITUDE;
+  String placeName = DEFAULT_PLACE;
   bool showPlace = true;
   bool fahrenheit = true;
 };
@@ -185,10 +201,10 @@ void loadSettings() {
   settings.message = prefs.getString("message", settings.message);
   settings.wifiSsid = prefs.getString("ssid", DEFAULT_WIFI_SSID);
   settings.wifiPassword = prefs.getString("wifipass", DEFAULT_WIFI_PASSWORD);
-  settings.weatherOn = prefs.getBool("weather", false);
-  settings.latitude = prefs.getDouble("lat", NAN);
-  settings.longitude = prefs.getDouble("lon", NAN);
-  settings.placeName = prefs.getString("place", "");
+  settings.weatherOn = prefs.getBool("weather", settings.weatherOn);
+  settings.latitude = prefs.getDouble("lat", settings.latitude);
+  settings.longitude = prefs.getDouble("lon", settings.longitude);
+  settings.placeName = prefs.getString("place", settings.placeName);
   settings.showPlace = prefs.getBool("showplace", true);
   settings.fahrenheit = prefs.getBool("fahrenheit", true);
   if (settings.text.mode >= (int)alpha::MODE_COUNT) settings.text.mode = 0;
@@ -279,8 +295,11 @@ bool fetchWeather() {
     lastWeatherError = "no location set";
     return false;
   }
-  char url[320];
-  weather::forecastUrl(url, sizeof(url), settings.latitude, settings.longitude, settings.fahrenheit);
+  char url[512];
+  if (!weather::forecastUrl(url, sizeof(url), settings.latitude, settings.longitude, settings.fahrenheit)) {
+    lastWeatherError = "URL too long";
+    return false;
+  }
   String body;
   String error;
   weather::Forecast f;
@@ -336,12 +355,11 @@ void showWeather(bool force = false) {
                                  weather::MAX_PAGES);
   }
 
-  // Short pages hold still; anything wider than the sign scrolls.
+  // Every screen scrolls right to left, one after another.
   alpha::Page pages[weather::MAX_PAGES];
   String summary;
   for (size_t i = 0; i < count; ++i) {
-    bool fits = strlen(lines[i]) <= SIGN_WIDTH_CHARS;
-    pages[i] = {lines[i], alpha::findMode(fits ? "hold" : "rotate")};
+    pages[i] = {lines[i], alpha::findMode(WEATHER_SCROLL_MODE)};
     summary += (i ? " | " : "") + String(lines[i]);
   }
 
