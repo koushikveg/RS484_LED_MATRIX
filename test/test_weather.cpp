@@ -24,13 +24,8 @@ static int failures = 0;
   } while (0)
 
 // Builds a response shaped like Open-Meteo's for the request made by
-// weather::forecastUrl(): "*_units" objects repeat every key with string
-// values (the parser must read from "current"/"hourly"/"daily"), and hourly
-// arrays have one value per hour of today.
-struct Hour {
-  double temp, chance, rain, showers, snow;
-};
-
+// weather::forecastUrl(). The "*_units" objects repeat every key with string
+// values; the parser must read from "current"/"daily" instead.
 static std::string num(double v) {
   if (isnan(v)) return "null";
   char b[32];
@@ -39,36 +34,33 @@ static std::string num(double v) {
 }
 
 static std::string forecastJson(const char* now, int code, double hi, double lo, double rainSum,
-                                double showersSum, double snowSum, const Hour* hours, size_t count) {
-  std::string temp, chance, rain, showers, snow;
-  for (size_t i = 0; i < count; ++i) {
-    const char* sep = i ? "," : "";
-    temp += sep + num(hours[i].temp);
-    chance += sep + num(hours[i].chance);
-    rain += sep + num(hours[i].rain);
-    showers += sep + num(hours[i].showers);
-    snow += sep + num(hours[i].snow);
-  }
+                                double showersSum, double snowSum, double chance) {
   return std::string("{\"latitude\":42.03,\"longitude\":-93.63,\"timezone\":\"America/Chicago\",") +
          "\"current_units\":{\"time\":\"iso8601\",\"temperature_2m\":\"\\u00b0F\"}," +
          "\"current\":{\"time\":\"2026-10-12T17:00\",\"interval\":900,\"temperature_2m\":" + now + "}," +
-         "\"hourly_units\":{\"time\":\"iso8601\",\"temperature_2m\":\"\\u00b0F\",\"precipitation_probability\":\"%\"," +
-         "\"rain\":\"inch\",\"showers\":\"inch\",\"snowfall\":\"inch\"}," +
-         "\"hourly\":{\"time\":[\"2026-10-12T00:00\"],\"temperature_2m\":[" + temp +
-         "],\"precipitation_probability\":[" + chance + "],\"rain\":[" + rain + "],\"showers\":[" +
-         showers + "],\"snowfall\":[" + snow + "]}," +
          "\"daily_units\":{\"time\":\"iso8601\",\"weather_code\":\"wmo code\",\"temperature_2m_max\":\"\\u00b0F\"," +
-         "\"rain_sum\":\"inch\",\"showers_sum\":\"inch\",\"snowfall_sum\":\"inch\"}," +
+         "\"rain_sum\":\"inch\",\"showers_sum\":\"inch\",\"snowfall_sum\":\"inch\"," +
+         "\"precipitation_probability_max\":\"%\"}," +
          "\"daily\":{\"time\":[\"2026-10-12\"],\"weather_code\":[" + num(code) + "],\"temperature_2m_max\":[" +
          num(hi) + "],\"temperature_2m_min\":[" + num(lo) + "],\"rain_sum\":[" + num(rainSum) +
-         "],\"showers_sum\":[" + num(showersSum) + "],\"snowfall_sum\":[" + num(snowSum) + "]}}";
+         "],\"showers_sum\":[" + num(showersSum) + "],\"snowfall_sum\":[" + num(snowSum) +
+         "],\"precipitation_probability_max\":[" + num(chance) + "]}}";
 }
 
 static size_t pagesFor(const std::string& json, bool fahrenheit, const char* label,
                        char pages[][weather::PAGE_LEN]) {
   weather::Forecast f;
-  if (!weather::parseForecast(json.c_str(), fahrenheit, f)) return 0;
+  if (!weather::parseForecast(json.c_str(), f)) return 0;
   return weather::formatPages(f, label, fahrenheit, pages, weather::MAX_PAGES);
+}
+
+// Just the precipitation screen ("" if none).
+static std::string precipFor(int code, double rain, double showers, double snow, double chance) {
+  char pages[weather::MAX_PAGES][weather::PAGE_LEN];
+  size_t n = pagesFor(forecastJson("50", code, 55, 45, rain, showers, snow, chance), true, "", pages);
+  for (size_t i = 0; i < n; ++i)
+    if (strstr(pages[i], "CHANCE")) return pages[i];
+  return "";
 }
 
 static const char* GEOCODE =
@@ -89,20 +81,16 @@ int main() {
   char pages[weather::MAX_PAGES][weather::PAGE_LEN];
   size_t n;
 
-  // ---- rainy afternoon: rain screen, no snow screen, no humidity
+  // ---- full cycle on a rainy day
   {
-    Hour h[24];
-    for (int i = 0; i < 24; ++i) h[i] = {60, 0, 0, 0, 0};
-    for (int i = 12; i < 18; ++i) h[i] = {58, 40, 0.04, 0.01, 0};
-    std::string json = forecastJson("61.6", 61, 66.4, 50.6, 0.25, 0.05, 0, h, 24);
-
+    std::string json = forecastJson("61.6", 61, 66.4, 50.6, 0.25, 0.05, 0, 40);
     weather::Forecast f;
-    CHECK(weather::parseForecast(json.c_str(), true, f));
+    CHECK(weather::parseForecast(json.c_str(), f));
     CHECK(fabs(f.tempNow - 61.6) < 1e-9);
     CHECK(f.code == 61);
     CHECK(fabs(f.rainInches - 0.30) < 1e-9);
-    CHECK(f.rainChance == 40);
-    CHECK(f.snowChance == -1);
+    CHECK(f.snowInches == 0);
+    CHECK(f.precipChance == 40);
 
     n = pagesFor(json, true, "AMES", pages);
     CHECK(n == 4);
@@ -112,65 +100,37 @@ int main() {
     CHECK(strcmp(pages[3], "RAIN 0.30 IN  40% CHANCE") == 0);
   }
 
-  // ---- snow day: dry cold hours with a chance count as snow too
+  // ---- type from forecast amounts, chance is the overall daily chance
+  CHECK(precipFor(73, 0, 0, 2.4, 75) == "SNOW 2.4 IN  75% CHANCE");
+  CHECK(precipFor(71, 0.1, 0, 0.5, 60) == "RAIN 0.10 IN + SNOW 0.5 IN  60% CHANCE");
+  CHECK(precipFor(66, 0.05, 0, 0, 30) == "FREEZING RAIN 0.05 IN  30% CHANCE");
+  CHECK(precipFor(80, 0, 0.4, 0, 55) == "RAIN 0.40 IN  55% CHANCE");  // showers count as rain
+
+  // ---- no amounts forecast: the weather code decides the type
+  CHECK(precipFor(71, 0, 0, 0, 20) == "SNOW <0.1 IN  20% CHANCE");
+  CHECK(precipFor(51, 0, 0, 0, 20) == "RAIN <0.01 IN  20% CHANCE");
+  CHECK(precipFor(3, 0, 0, 0, 20) == "PRECIP <0.01 IN  20% CHANCE");
+
+  // ---- only shown ABOVE 5%
+  CHECK(precipFor(61, 0.01, 0, 0, 5) == "");
+  CHECK(precipFor(61, 0.01, 0, 0, 6) == "RAIN 0.01 IN  6% CHANCE");
+  CHECK(precipFor(61, 0.2, 0, 0, NAN) == "");  // unknown chance: hidden
+
+  // ---- longest screen fits
+  CHECK(precipFor(67, 12.34, 0, 25.5, 100) == "FREEZING RAIN 12.34 IN + SNOW 25.5 IN  100% CHANCE");
+
+  // ---- Celsius temperatures; amounts stay in inches
   {
-    Hour h[24];
-    for (int i = 0; i < 24; ++i) h[i] = {20, 0, 0, 0, 0};
-    for (int i = 6; i < 14; ++i) h[i] = {22, 60, 0, 0, 0.3};
-    h[20] = {18, 75, 0, 0, 0};  // no amount forecast, but below freezing
-    std::string json = forecastJson("24", 73, 25, 15, 0, 0, 2.4, h, 24);
-
-    n = pagesFor(json, true, "AMES", pages);
-    CHECK(n == 4);
-    CHECK(strcmp(pages[1], "SNOW") == 0);
-    CHECK(strcmp(pages[2], "NOW 24F  HIGH 25F  LOW 15F") == 0);
-    CHECK(strcmp(pages[3], "SNOW 2.4 IN  75% CHANCE") == 0);
-  }
-
-  // ---- only shown ABOVE 5%: exactly 5% is hidden, 6% is shown
-  {
-    Hour h[24];
-    for (int i = 0; i < 24; ++i) h[i] = {50, 5, 0, 0, 0};
-    std::string json = forecastJson("50", 3, 55, 45, 0, 0, 0, h, 24);
-    n = pagesFor(json, true, "", pages);
-    CHECK(n == 2);  // OVERCAST, temps
-    CHECK(strcmp(pages[0], "OVERCAST") == 0);
-
-    h[9].chance = 6;
-    json = forecastJson("50", 3, 55, 45, 0, 0, 0, h, 24);
-    n = pagesFor(json, true, "", pages);
-    CHECK(n == 3);
-    CHECK(strcmp(pages[2], "RAIN <0.01 IN  6% CHANCE") == 0);
-  }
-
-  // ---- mixed day: both screens, rain first; trace snow
-  {
-    Hour h[24];
-    for (int i = 0; i < 24; ++i) h[i] = {34, 0, 0, 0, 0};
-    for (int i = 0; i < 6; ++i) h[i] = {30, 30, 0, 0, 0.02};
-    for (int i = 12; i < 18; ++i) h[i] = {38, 50, 0.1, 0, 0};
-    std::string json = forecastJson("36", 71, 40, 29, 0.6, 0, 0.04, h, 24);
-    n = pagesFor(json, true, "AMES", pages);
-    CHECK(n == 5);
-    CHECK(strcmp(pages[3], "RAIN 0.60 IN  50% CHANCE") == 0);
-    CHECK(strcmp(pages[4], "SNOW <0.1 IN  30% CHANCE") == 0);
-  }
-
-  // ---- Celsius: freezing point is 0C; amounts stay in inches
-  {
-    Hour h[2] = {{-1, 30, 0, 0, 0}, {3, 10, 0, 0, 0}};
-    std::string json = forecastJson("-0.4", 3, 2, -3, 0, 0, 0, h, 2);
+    std::string json = forecastJson("-0.4", 73, 2, -3, 0, 0, 1.2, 50);
     n = pagesFor(json, false, "", pages);
-    CHECK(n == 4);
+    CHECK(n == 3);
     CHECK(strcmp(pages[1], "NOW 0C  HIGH 2C  LOW -3C") == 0);
-    CHECK(strcmp(pages[2], "RAIN <0.01 IN  10% CHANCE") == 0);
-    CHECK(strcmp(pages[3], "SNOW <0.1 IN  30% CHANCE") == 0);
+    CHECK(strcmp(pages[2], "SNOW 1.2 IN  50% CHANCE") == 0);
   }
 
-  // ---- nulls: missing current temp and hourly values are skipped
+  // ---- nulls: missing current temp and precipitation are skipped
   {
-    Hour h[3] = {{NAN, NAN, NAN, NAN, NAN}, {70, 0, 0, 0, 0}, {70, NAN, 0, 0, 0}};
-    std::string json = forecastJson("null", 95, 30.2, 21.9, NAN, NAN, NAN, h, 3);
+    std::string json = forecastJson("null", 95, 30.2, 21.9, NAN, NAN, NAN, NAN);
     n = pagesFor(json, false, "", pages);
     CHECK(n == 2);
     CHECK(strcmp(pages[0], "THUNDERSTORMS") == 0);
@@ -180,17 +140,15 @@ int main() {
   // ---- bad responses
   {
     weather::Forecast f;
-    CHECK(!weather::parseForecast("{\"error\":true,\"reason\":\"bad\"}", true, f));
-    CHECK(!weather::parseForecast("", true, f));
-    CHECK(!weather::parseForecast("{\"daily\":{\"temperature_2m_max\":[1", true, f));
+    CHECK(!weather::parseForecast("{\"error\":true,\"reason\":\"bad\"}", f));
+    CHECK(!weather::parseForecast("", f));
+    CHECK(!weather::parseForecast("{\"daily\":{\"temperature_2m_max\":[1", f));
   }
 
   // ---- page limit respected
   {
-    Hour h[1] = {{40, 50, 0.1, 0, 0}};
-    std::string json = forecastJson("40", 61, 45, 35, 0.1, 0, 0, h, 1);
     weather::Forecast f;
-    weather::parseForecast(json.c_str(), true, f);
+    weather::parseForecast(forecastJson("40", 61, 45, 35, 0.1, 0, 0, 50).c_str(), f);
     CHECK(weather::formatPages(f, "AMES", true, pages, 2) == 2);
   }
 
@@ -217,7 +175,7 @@ int main() {
   CHECK(strstr(url, "latitude=43.0389&longitude=-87.9065") != nullptr);
   CHECK(strstr(url, "temperature_unit=fahrenheit") != nullptr);
   CHECK(strstr(url, "precipitation_unit=inch") != nullptr);
-  CHECK(strstr(url, "hourly=temperature_2m,precipitation_probability,rain,showers,snowfall") != nullptr);
+  CHECK(strstr(url, "rain_sum,showers_sum,snowfall_sum,precipitation_probability_max") != nullptr);
   CHECK(strstr(url, "humidity") == nullptr);
   weather::forecastUrl(url, sizeof(url), 1, 2, false);
   CHECK(strstr(url, "temperature_unit") == nullptr);

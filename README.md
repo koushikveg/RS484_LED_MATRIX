@@ -9,7 +9,7 @@ It has two display modes:
   pulls today's forecast from [Open-Meteo](https://open-meteo.com) (free, no
   API key) every 15 minutes, and the sign scrolls it right to left, one screen
   after another:
-  `AMES` → `PARTLY CLOUDY` → `NOW 62F  HIGH 66F  LOW 51F` → `RAIN 0.30 IN  40% CHANCE` → `SNOW 1.2 IN  30% CHANCE`
+  `AMES` → `PARTLY CLOUDY` → `NOW 62F  HIGH 66F  LOW 51F` → `SNOW 1.2 IN  40% CHANCE`
 - **Message:** shows any text you type.
 
 You can control it from the USB Serial Monitor, from a web page
@@ -192,22 +192,29 @@ unit, connect it to the same A/B wires, type `/sniff`, and capture what it sends
 | City | `AMES` | Always (turn off with `/showplace off`) |
 | Today's conditions | `PARTLY CLOUDY` | Always |
 | Temperatures | `NOW 62F  HIGH 66F  LOW 51F` | Always |
-| Rain | `RAIN 0.30 IN  40% CHANCE` | Only when the chance of rain is **above 5%** |
-| Snow | `SNOW 1.2 IN  30% CHANCE` | Only when the chance of snow is **above 5%** |
+| Precipitation: type, amount and chance on one screen | `RAIN 0.30 IN  40% CHANCE` | Only when today's chance of precipitation is **above 5%** |
 
 - Every screen scrolls right to left. To change that, set `WEATHER_SCROLL_MODE`
   at the top of `led_sign.ino` to another mode from `/help`, e.g. `"hold"`.
   (`/mode` only affects typed messages.)
-- Amounts are today's forecast totals in **inches**, even with `/units c`.
-  Rain includes showers. Amounts too small to show read `<0.01 IN` (rain) or
-  `<0.1 IN` (snow).
-- **How rain and snow chances are split:** Open-Meteo gives one precipitation
-  chance per hour, not separate rain and snow chances. The firmware looks at
-  each hour of today. If snow is forecast for that hour, the hour counts toward
-  snow. If rain is forecast, it counts toward rain (it can count toward both).
-  If neither amount is forecast, the temperature decides: at or below freezing
-  is snow, above is rain. Each type's chance is the highest chance among its
-  hours.
+- **Type** comes from Open-Meteo's forecast for today: whichever of rain
+  (including showers) and snowfall has an amount forecast. If neither has an
+  amount, today's weather code decides. The precipitation screen can read:
+
+  | Forecast | Screen |
+  |---|---|
+  | Rain only | `RAIN 0.30 IN  40% CHANCE` |
+  | Snow only | `SNOW 1.2 IN  40% CHANCE` |
+  | Both | `RAIN 0.10 IN + SNOW 0.5 IN  60% CHANCE` |
+  | Freezing rain (weather code) | `FREEZING RAIN 0.05 IN  30% CHANCE` |
+  | A chance but no type forecast | `PRECIP <0.01 IN  20% CHANCE` |
+
+- **Chance** is today's highest chance of any precipitation. Open-Meteo
+  doesn't give separate rain and snow chances, so on a mixed day the one
+  percentage covers both.
+- **Amounts** are today's forecast totals in **inches**, even with
+  `/units c`. Amounts too small to show read `<0.01 IN` (rain) or `<0.1 IN`
+  (snow).
 
 The ESP32 sends all the screens to the sign as one multi-page message, so the
 sign does the cycling itself. The sign is only rewritten when the forecast

@@ -24,17 +24,14 @@ struct Forecast {
   double tempNow = NAN;
   double tempHigh = NAN;
   double tempLow = NAN;
-  int code = -1;          // WMO weather code for today
-  double rainInches = 0;  // today's rain + showers total
-  double snowInches = 0;  // today's snowfall total
-  int rainChance = -1;    // %, highest hourly chance among rain hours, -1 = none
-  int snowChance = -1;    // %, highest hourly chance among snow hours, -1 = none
+  int code = -1;           // WMO weather code for today (most significant weather)
+  double rainInches = 0;   // today's rain + showers total
+  double snowInches = 0;   // today's snowfall total
+  int precipChance = -1;   // %, today's highest chance of any precipitation, -1 = unknown
 };
 
-// Precipitation is only shown when its chance is above this (percent).
+// The precipitation screen only appears when the chance is above this (percent).
 constexpr int MIN_PRECIP_CHANCE = 5;
-
-constexpr size_t MAX_HOURS = 25;  // forecast_days=1 returns 24 hourly values
 
 struct Place {
   char name[48] = "";
@@ -45,18 +42,15 @@ struct Place {
 // ---------------------------------------------------------------- URLs
 
 // Precipitation amounts (rain and snowfall) are always requested in inches.
-// Hourly data covers today (local midnight to midnight) and is used to work
-// out separate rain and snow chances; Open-Meteo only gives one combined
-// probability per hour.
-// Returns false if `cap` is too small (the URL is up to ~350 bytes).
+// Returns false if `cap` is too small.
 inline bool forecastUrl(char* out, size_t cap, double lat, double lon, bool fahrenheit) {
   int len = snprintf(out, cap,
-           "https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f"
-           "&current=temperature_2m"
-           "&hourly=temperature_2m,precipitation_probability,rain,showers,snowfall"
-           "&daily=weather_code,temperature_2m_max,temperature_2m_min,rain_sum,showers_sum,snowfall_sum"
-           "&timezone=auto&forecast_days=1&precipitation_unit=inch%s",
-           lat, lon, fahrenheit ? "&temperature_unit=fahrenheit" : "");
+                     "https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f"
+                     "&current=temperature_2m"
+                     "&daily=weather_code,temperature_2m_max,temperature_2m_min,"
+                     "rain_sum,showers_sum,snowfall_sum,precipitation_probability_max"
+                     "&timezone=auto&forecast_days=1&precipitation_unit=inch%s",
+                     lat, lon, fahrenheit ? "&temperature_unit=fahrenheit" : "");
   return len > 0 && (size_t)len < cap;
 }
 
@@ -140,30 +134,6 @@ inline bool number(const char* begin, const char* end, const char* key, double& 
   return true;
 }
 
-// Reads the numeric array under `key` into `out` (JSON null becomes NAN).
-// Returns the number of elements read, at most `max`.
-inline size_t numbers(const char* begin, const char* end, const char* key, double* out, size_t max) {
-  const char* v = findKey(begin, end, key);
-  if (!v || *v != '[') return 0;
-  size_t n = 0;
-  const char* p = v + 1;
-  while (p < end && n < max) {
-    while (p < end && (*p == ' ' || *p == ',')) ++p;
-    if (p >= end || *p == ']') break;
-    if (strncmp(p, "null", 4) == 0) {
-      out[n++] = NAN;
-      p += 4;
-      continue;
-    }
-    char* stop = nullptr;
-    double d = strtod(p, &stop);
-    if (stop == p || stop > end) break;
-    out[n++] = d;
-    p = stop;
-  }
-  return n;
-}
-
 // Reads a string under `key` into `out`, upper-cased and reduced to ASCII
 // (the sign can't show other characters). Returns false if missing.
 inline bool text(const char* begin, const char* end, const char* key, char* out, size_t cap) {
@@ -189,10 +159,9 @@ inline bool text(const char* begin, const char* end, const char* key, char* out,
 
 // ---------------------------------------------------------------- parsers
 
-// Parses an Open-Meteo forecast response (see forecastUrl). `fahrenheit`
-// must match the request so the freezing point is right. Returns false
+// Parses an Open-Meteo forecast response (see forecastUrl). Returns false
 // unless at least today's high and low were found.
-inline bool parseForecast(const char* json, bool fahrenheit, Forecast& f) {
+inline bool parseForecast(const char* json, Forecast& f) {
   f = Forecast();
   const char* end = json + strlen(json);
 
@@ -210,34 +179,7 @@ inline bool parseForecast(const char* json, bool fahrenheit, Forecast& f) {
   if (number(db, de, "rain_sum", v) && !isnan(v)) f.rainInches += v;
   if (number(db, de, "showers_sum", v) && !isnan(v)) f.rainInches += v;
   if (number(db, de, "snowfall_sum", v) && !isnan(v)) f.snowInches = v;
-
-  // Split each hour's precipitation chance into rain or snow. The hour's
-  // forecast amounts decide; if neither is forecast, the temperature does.
-  const char* hb = json;
-  const char* he = end;
-  if (section(hb, he, "hourly")) {
-    double temp[MAX_HOURS], chance[MAX_HOURS], rain[MAX_HOURS], showers[MAX_HOURS], snow[MAX_HOURS];
-    size_t n = numbers(hb, he, "precipitation_probability", chance, MAX_HOURS);
-    size_t nt = numbers(hb, he, "temperature_2m", temp, MAX_HOURS);
-    size_t nr = numbers(hb, he, "rain", rain, MAX_HOURS);
-    size_t ns = numbers(hb, he, "showers", showers, MAX_HOURS);
-    size_t nf = numbers(hb, he, "snowfall", snow, MAX_HOURS);
-    double freezing = fahrenheit ? 32.0 : 0.0;
-    for (size_t i = 0; i < n; ++i) {
-      if (isnan(chance[i])) continue;
-      double r = (i < nr && !isnan(rain[i]) ? rain[i] : 0) + (i < ns && !isnan(showers[i]) ? showers[i] : 0);
-      double sn = i < nf && !isnan(snow[i]) ? snow[i] : 0;
-      bool isSnow = sn > 0;
-      bool isRain = r > 0;
-      if (!isSnow && !isRain && i < nt && !isnan(temp[i])) {
-        isSnow = temp[i] <= freezing;
-        isRain = !isSnow;
-      }
-      int c = (int)lround(chance[i]);
-      if (isRain && c > f.rainChance) f.rainChance = c;
-      if (isSnow && c > f.snowChance) f.snowChance = c;
-    }
-  }
+  if (number(db, de, "precipitation_probability_max", v)) f.precipChance = (int)lround(v);
   return !isnan(f.tempHigh) && !isnan(f.tempLow);
 }
 
@@ -289,7 +231,7 @@ inline const char* describe(int code) {
 }
 
 constexpr size_t MAX_PAGES = 8;
-constexpr size_t PAGE_LEN = 48;
+constexpr size_t PAGE_LEN = 64;
 
 // Formats an amount in inches, showing "<0.01" / "<0.1" for traces.
 inline void formatInches(char* out, size_t cap, double inches, int decimals) {
@@ -298,12 +240,66 @@ inline void formatInches(char* out, size_t cap, double inches, int decimals) {
   else snprintf(out, cap, "%.*f", decimals, inches);
 }
 
+// What kind of precipitation today's weather code describes.
+enum class CodeType { NONE, RAIN, FREEZING_RAIN, SNOW };
+
+inline CodeType codeType(int code) {
+  switch (code) {
+    case 56: case 57: case 66: case 67:
+      return CodeType::FREEZING_RAIN;
+    case 71: case 73: case 75: case 77: case 85: case 86:
+      return CodeType::SNOW;
+    case 51: case 53: case 55: case 61: case 63: case 65:
+    case 80: case 81: case 82: case 95: case 96: case 99:
+      return CodeType::RAIN;
+    default:
+      return CodeType::NONE;
+  }
+}
+
+// Builds the precipitation screen: type, amount and chance together, e.g.
+//   "RAIN 0.30 IN  40% CHANCE"
+//   "SNOW 1.2 IN  40% CHANCE"
+//   "RAIN 0.10 IN + SNOW 0.5 IN  60% CHANCE"   (both forecast)
+//   "FREEZING RAIN 0.05 IN  30% CHANCE"
+// The type comes from Open-Meteo's forecast amounts; if none are forecast,
+// from today's weather code. The chance is today's overall precipitation
+// probability (Open-Meteo doesn't give separate rain and snow chances).
+// Returns false when the chance isn't above MIN_PRECIP_CHANCE.
+inline bool formatPrecip(const Forecast& f, char* out, size_t cap) {
+  if (f.precipChance <= MIN_PRECIP_CHANCE) return false;
+
+  CodeType byCode = codeType(f.code);
+  bool rain = f.rainInches > 0;
+  bool snow = f.snowInches > 0;
+  if (!rain && !snow) {
+    rain = byCode == CodeType::RAIN || byCode == CodeType::FREEZING_RAIN;
+    snow = byCode == CodeType::SNOW;
+  }
+  const char* rainName = byCode == CodeType::FREEZING_RAIN ? "FREEZING RAIN" : "RAIN";
+
+  char rainAmt[16], snowAmt[16];
+  formatInches(rainAmt, sizeof(rainAmt), f.rainInches, 2);
+  formatInches(snowAmt, sizeof(snowAmt), f.snowInches, 1);
+
+  if (rain && snow) {
+    snprintf(out, cap, "%s %s IN + SNOW %s IN  %d%% CHANCE", rainName, rainAmt, snowAmt, f.precipChance);
+  } else if (snow) {
+    snprintf(out, cap, "SNOW %s IN  %d%% CHANCE", snowAmt, f.precipChance);
+  } else if (rain) {
+    snprintf(out, cap, "%s %s IN  %d%% CHANCE", rainName, rainAmt, f.precipChance);
+  } else {
+    // A chance with no type in the forecast (e.g. a cloudy day with a slight chance)
+    snprintf(out, cap, "PRECIP %s IN  %d%% CHANCE", rainAmt, f.precipChance);
+  }
+  return true;
+}
+
 // Turns a forecast into the screens shown on the sign, in order:
-//   AMES  ->  PARTLY CLOUDY  ->  NOW 62F  HIGH 66F  LOW 51F
-//   ->  RAIN 0.25 IN  40% CHANCE  ->  SNOW 1.2 IN  30% CHANCE
-// Rain and snow screens only appear when their chance is above
-// MIN_PRECIP_CHANCE. The sign has no degree symbol, so temperatures read like
-// "66F". Returns the number of screens written.
+//   AMES  ->  PARTLY CLOUDY  ->  NOW 62F  HIGH 66F  LOW 51F  ->  RAIN 0.30 IN  40% CHANCE
+// The precipitation screen only appears when the chance is above
+// MIN_PRECIP_CHANCE. The sign has no degree symbol, so temperatures read
+// like "66F". Returns the number of screens written.
 inline size_t formatPages(const Forecast& f, const char* label, bool fahrenheit,
                           char pages[][PAGE_LEN], size_t maxPages) {
   size_t n = 0;
@@ -324,15 +320,7 @@ inline size_t formatPages(const Forecast& f, const char* label, bool fahrenheit,
   while (len > 0 && len <= sizeof(temps) && temps[len - 1] == ' ') temps[--len] = '\0';
   if (len && n < maxPages) snprintf(pages[n++], PAGE_LEN, "%s", temps);
 
-  char amount[16];
-  if (f.rainChance > MIN_PRECIP_CHANCE && n < maxPages) {
-    formatInches(amount, sizeof(amount), f.rainInches, 2);
-    snprintf(pages[n++], PAGE_LEN, "RAIN %s IN  %d%% CHANCE", amount, f.rainChance);
-  }
-  if (f.snowChance > MIN_PRECIP_CHANCE && n < maxPages) {
-    formatInches(amount, sizeof(amount), f.snowInches, 1);
-    snprintf(pages[n++], PAGE_LEN, "SNOW %s IN  %d%% CHANCE", amount, f.snowChance);
-  }
+  if (n < maxPages && formatPrecip(f, pages[n], PAGE_LEN)) ++n;
   return n;
 }
 
