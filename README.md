@@ -152,20 +152,87 @@ If the sign still shows nothing, it may have been configured for a transit
 J1708/J1587 protocol instead of Alpha. If you have the vehicle's original head
 unit, connect it to the same A/B wires, type `/sniff`, and capture what it sends.
 
+## Connecting to Wi-Fi
+
+The ESP32 needs your home Wi-Fi to download the weather. You enter the
+network name and password **once, on the ESP32 itself**. They're saved in its
+flash memory and survive power cycles and firmware updates (unless you turn on
+*Tools → Erase All Flash Before Sketch Upload*). They are never stored in this
+repository.
+
+The ESP32-S3 only connects to **2.4 GHz** Wi-Fi. If your router has
+separate 2.4 GHz and 5 GHz networks, use the 2.4 GHz one. A single name for
+both bands usually works.
+
+### Option A: Serial Monitor (USB)
+
+1. Plug the board into your computer with USB-C and open the Arduino IDE
+   Serial Monitor.
+2. Set the baud rate to **115200** and the line ending to **Newline**
+   (the two drop-downs in the Serial Monitor).
+3. Type each line and press Enter, using your network's name and password:
+   ```
+   /ssid YourNetworkName
+   /pass YourWiFiPassword
+   ```
+   Both are case-sensitive and can contain spaces.
+4. Within a few seconds it should print:
+   ```
+   Wi-Fi connected: http://ledsign.local or http://192.168.1.42
+   ```
+   (your IP address will differ). Weather starts downloading straight away.
+
+### Option B: from your phone (no USB needed)
+
+1. Power the board. If it has no saved network, or can't reach the saved one
+   for 20 seconds, it starts its own Wi-Fi network.
+2. On your phone, join **`LED-Sign`** (password **`ledsign123`**).
+3. Open **http://192.168.4.1** in the browser.
+4. Under **Home Wi-Fi**, enter your network name and password and tap
+   **Save and connect**.
+5. Rejoin your normal Wi-Fi. The `LED-Sign` network turns itself off once
+   the ESP32 is connected to your home network.
+
+### Checking it worked
+
+- Type `/status` in the Serial Monitor. The `wifi` line shows the network
+  and the ESP32's IP address, and `weather` shows when it last updated.
+- On a phone or computer on the same network, open **http://ledsign.local**.
+  Some Android phones don't support `.local` addresses; use the IP address
+  from `/status` instead.
+- Once the weather downloads, the sign starts scrolling the Ames forecast.
+
+### Changing networks later
+
+Run `/ssid` and `/pass` again, or use the **Home Wi-Fi** form on the web page.
+The new values replace the old ones. On the web page, leave the password
+blank to keep the saved one.
+
+### Building your Wi-Fi into the firmware (optional)
+
+You can also put the network name and password in `DEFAULT_WIFI_SSID` and
+`DEFAULT_WIFI_PASSWORD` at the top of `led_sign.ino` before flashing. They're
+used until a network is saved with `/ssid`/`/pass` or the web page. **Don't
+commit or push that change:** anything committed ends up on GitHub, where a
+public repository would expose your Wi-Fi password.
+
+### If it won't connect
+
+| Symptom | Fix |
+|---|---|
+| `/status` says `not connected` | Re-enter the name and password; check capitals and spaces. |
+| Still not connecting | Make sure the network is 2.4 GHz and the board is in range. |
+| Nothing prints in the Serial Monitor | In the Arduino IDE set **Tools → USB CDC On Boot → Enabled** and re-flash; check the baud rate is 115200. |
+| Commands do nothing | Set the Serial Monitor line ending to **Newline**. |
+| `ledsign.local` doesn't open | Use the IP address from `/status`. |
+| `LED-Sign` network doesn't appear | It only appears when home Wi-Fi isn't connected; wait 20 s after power-up. |
+
+The Wi-Fi password is stored unencrypted in the ESP32's flash. It's never
+shown on the web page or in `/status`.
+
 ## Setting up weather
 
-1. **Connect to your home Wi-Fi.** In the Serial Monitor type:
-   ```
-   /ssid MyHomeNetwork
-   /pass my-wifi-password
-   ```
-   The ESP32 prints its address once connected, e.g.
-   `Wi-Fi connected: http://ledsign.local or http://192.168.1.42`.
-   The ESP32 only supports **2.4 GHz** Wi-Fi.
-
-   *No USB handy?* With no saved network (or if it can't connect for 20 s), the
-   ESP32 starts its own Wi-Fi network **`LED-Sign`** (password `ledsign123`).
-   Join it, open **http://192.168.4.1**, and fill in *Home Wi-Fi*.
+1. **Wi-Fi:** connect it first (see [Connecting to Wi-Fi](#connecting-to-wi-fi)).
 
 2. **Location:** it's preset to **Ames, Iowa** (42.0308, −93.6319, shown as
    `AMES`), so there's nothing to do. To change it, use a city name:
