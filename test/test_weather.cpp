@@ -233,7 +233,7 @@ int main() {
   CHECK(fabs(place.longitude - -87.90647) < 1e-9);
 
   CHECK(weather::parsePlace(GEOCODE_ACCENTS, place));
-  CHECK(strcmp(place.name, "MONTRAL \"QC\"") == 0);
+  CHECK(strcmp(place.name, "MONTREAL \"QC\"") == 0);
   CHECK(fabs(place.latitude - 45.50884) < 1e-9);
 
   CHECK(!weather::parsePlace(GEOCODE_EMPTY, place));

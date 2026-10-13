@@ -164,21 +164,55 @@ inline bool average(const char* begin, const char* end, const char* key, double&
   return true;
 }
 
+// Folds a Latin-1 code point (U+00C0..U+00FF, e.g. e-acute) to its plain
+// ASCII letter, since the sign can only show ASCII. Returns 0 if none.
+inline char foldLatin1(unsigned cp) {
+  static const char FOLD[] = "AAAAAAACEEEEIIIIDNOOOOO OUUUUYTsaaaaaaaceeeeiiiidnooooo ouuuuyty";
+  if (cp < 0xC0 || cp > 0xFF) return 0;
+  char c = FOLD[cp - 0xC0];
+  return c == ' ' ? 0 : c;
+}
+
+inline int hexValue(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
 // Reads a string under `key` into `out`, upper-cased and reduced to ASCII
-// (the sign can't show other characters). Returns false if missing.
+// (the sign can't show other characters). Accented Latin letters, whether
+// sent as UTF-8 or as \u00XX escapes, become plain letters ("Montreal").
+// Returns false if missing.
 inline bool text(const char* begin, const char* end, const char* key, char* out, size_t cap) {
   const char* v = findKey(begin, end, key);
   if (!v || *v != '"' || cap == 0) return false;
   size_t n = 0;
   for (const char* p = v + 1; p < end && *p != '"'; ++p) {
     char c = *p;
+    unsigned char u = (unsigned char)c;
     if (c == '\\' && p + 1 < end) {
       ++p;
-      if (*p == 'u') {  // \uXXXX: not displayable, skip it
+      if (*p == 'u') {  // \uXXXX
+        unsigned cp = 0;
+        bool ok = p + 4 < end;
+        for (int k = 1; ok && k <= 4; ++k) {
+          int h = hexValue(p[k]);
+          if (h < 0) ok = false;
+          else cp = cp * 16 + (unsigned)h;
+        }
         p += 4;
-        continue;
+        c = ok ? foldLatin1(cp) : 0;
+        if (!c) continue;
+      } else {
+        c = *p;
       }
-      c = *p;
+    } else if (u == 0xC3 && p + 1 < end) {  // UTF-8 for U+00C0..U+00FF
+      ++p;
+      c = foldLatin1(0xC0 + ((unsigned char)*p & 0x3F));
+      if (!c) continue;
+    } else if (u >= 0x80) {
+      continue;  // other non-ASCII: skip
     }
     if ((unsigned char)c < 0x20 || (unsigned char)c > 0x7E) continue;
     if (n + 1 < cap) out[n++] = (c >= 'a' && c <= 'z') ? c - 32 : c;
