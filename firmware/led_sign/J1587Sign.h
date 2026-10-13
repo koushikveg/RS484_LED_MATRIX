@@ -57,24 +57,61 @@ inline bool checksumOk(const uint8_t* frame, size_t len) {
   return len > 0 && sum == 0;
 }
 
-// Builds the RTS frame. With segments = 1 this reproduces the known-good
-// packet byte for byte:
+constexpr uint8_t CM_EOM = 0x03;  // end of message (sign's acknowledgement)
+
+// Where the RTS carries the message size. The known-good single-segment RTS is
 //   BC C5 07 BD 01 00 00 00 42 01 77
-// The final data byte appears to be the number of segments to follow (it is
-// 01 for the single-segment "HELLO"); this is an inference for messages that
-// need more than one segment. Returns the frame length (11).
-inline size_t buildRts(uint8_t* out, uint8_t segments) {
+// and the sign's replies end in the same "42 01" (CTS: BD C5 06 BC 02 00 01
+// 42 01 76, EOM: BD C5 04 BC 03 42 01 78), so "42 01" looks like a fixed ID
+// rather than a size. Sending "42 06" for a 6-segment message got no CTS.
+// The firmware tries these layouts for multi-segment messages and remembers
+// the one the sign answers:
+enum RtsLayout : uint8_t {
+  RTS_FIXED = 0,       // 00 00 00 42 01 exactly (sign ignores the size)
+  RTS_STANDARD = 1,    // segs lenLo lenHi 42 01 (SAE J1587 order)
+  RTS_SEGS_FIRST = 2,  // segs 00 00 42 01
+  RTS_TOTAL_ONLY = 3,  // 00 lenLo lenHi 42 01
+  RTS_SEGS_LAST = 4,   // 00 00 00 42 segs (first guess; not answered)
+  RTS_LAYOUT_COUNT = 5
+};
+
+inline const char* rtsLayoutName(uint8_t layout) {
+  switch (layout) {
+    case RTS_FIXED: return "fixed";
+    case RTS_STANDARD: return "standard";
+    case RTS_SEGS_FIRST: return "segs-first";
+    case RTS_TOTAL_ONLY: return "total-only";
+    case RTS_SEGS_LAST: return "segs-last";
+    default: return "?";
+  }
+}
+
+// Builds an RTS frame for a message of `segments` PID 198 segments carrying
+// `totalBytes` of payload. RTS_FIXED reproduces the known-good packet byte for
+// byte whatever the size. Returns the frame length (11).
+inline size_t buildRts(uint8_t* out, uint8_t layout, size_t segments, size_t totalBytes) {
+  uint8_t segs = (uint8_t)segments;
+  uint8_t lo = (uint8_t)(totalBytes & 0xFF);
+  uint8_t hi = (uint8_t)(totalBytes >> 8);
+  uint8_t x0 = 0, x1 = 0, x2 = 0, last = 0x01;
+  switch (layout) {
+    case RTS_STANDARD: x0 = segs; x1 = lo; x2 = hi; break;
+    case RTS_SEGS_FIRST: x0 = segs; break;
+    case RTS_TOTAL_ONLY: x1 = lo; x2 = hi; break;
+    case RTS_SEGS_LAST: last = segs; break;
+    default: break;  // RTS_FIXED
+  }
   size_t n = 0;
   out[n++] = MID_CONTROLLER;
   out[n++] = PID_CONN_MGMT;
   out[n++] = 0x07;  // data bytes that follow
   out[n++] = MID_SIGN;
   out[n++] = CM_RTS;
-  out[n++] = 0x00;
-  out[n++] = 0x00;
-  out[n++] = 0x00;
+  out[n++] = x0;
+  out[n++] = x1;
+  out[n++] = x2;
   out[n++] = (uint8_t)FILE_LABEL;
-  out[n++] = segments;
+  out[n++] = last;
   out[n] = checksum(out, n);
   return n + 1;
 }
@@ -149,23 +186,28 @@ inline size_t buildSegment(uint8_t* out, const uint8_t* payload, size_t payloadL
   return n + 1;
 }
 
-// Looks for a CTS from the sign in received bytes: a frame starting with the
-// sign's MID and PID 197 whose connection-management code is CTS. Returns
-// true and fills the first data bytes the sign sent if found.
-inline bool findCts(const uint8_t* rx, size_t len, uint8_t* segmentsToSend, uint8_t* nextSegment) {
+// Finds a valid PID 197 frame from the sign addressed to us with the given
+// connection-management code (CM_CTS, CM_EOM, ...). On success copies the
+// data bytes after the code into `data` (up to `cap`) and sets `dataLen`.
+inline bool findConnMgmt(const uint8_t* rx, size_t len, uint8_t code, uint8_t* data = nullptr,
+                         size_t cap = 0, size_t* dataLen = nullptr) {
   for (size_t i = 0; i + 5 <= len; ++i) {
     if (rx[i] != MID_SIGN || rx[i + 1] != PID_CONN_MGMT) continue;
     size_t count = rx[i + 2];
-    if (i + 3 + count + 1 > len) continue;  // incomplete frame
+    if (count < 2 || i + 3 + count + 1 > len) continue;  // too short / incomplete
     if (!checksumOk(rx + i, 3 + count + 1)) continue;
-    // data: dest MID, code, then (for CTS) segments to send, next segment
-    if (count >= 2 && rx[i + 4] == CM_CTS) {
-      if (segmentsToSend) *segmentsToSend = count >= 3 ? rx[i + 5] : 0;
-      if (nextSegment) *nextSegment = count >= 4 ? rx[i + 6] : 0;
-      return true;
+    if (rx[i + 3] != MID_CONTROLLER || rx[i + 4] != code) continue;
+    size_t extra = count - 2;
+    if (data) {
+      for (size_t k = 0; k < extra && k < cap; ++k) data[k] = rx[i + 5 + k];
     }
+    if (dataLen) *dataLen = extra;
+    return true;
   }
   return false;
 }
+
+inline bool findCts(const uint8_t* rx, size_t len) { return findConnMgmt(rx, len, CM_CTS); }
+inline bool findEom(const uint8_t* rx, size_t len) { return findConnMgmt(rx, len, CM_EOM); }
 
 }  // namespace j1587
