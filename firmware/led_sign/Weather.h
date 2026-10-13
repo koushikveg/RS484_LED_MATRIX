@@ -373,4 +373,55 @@ inline size_t formatPages(const Forecast& f, const char* label, bool fahrenheit,
   return n;
 }
 
+// Upper bound on screens after fitScreens() splits wide lines.
+constexpr size_t MAX_SCREENS = 16;
+
+// Splits one line into screens no wider than `width` characters so held
+// (non-scrolling) screens are never cut off. Splits at double spaces first
+// ("NOW 62F  HIGH 66F  LOW 51F" -> "NOW 62F" / "HIGH 66F" / "LOW 51F"), then
+// wraps at single spaces; a single word longer than `width` is cut. Appends
+// to `out` starting at index `n` and returns the new count.
+inline size_t fitScreens(const char* line, size_t width, char out[][PAGE_LEN], size_t n, size_t maxOut) {
+  if (width == 0 || width >= PAGE_LEN) width = PAGE_LEN - 1;
+  auto emit = [&](const char* s, size_t len) {
+    while (len && *s == ' ') ++s, --len;          // trim
+    while (len && s[len - 1] == ' ') --len;
+    if (!len || n >= maxOut) return;
+    if (len > width) len = width;
+    memcpy(out[n], s, len);
+    out[n][len] = '\0';
+    ++n;
+  };
+
+  const char* p = line;
+  while (*p && n < maxOut) {
+    // Next part: up to a double space or the end.
+    const char* end = strstr(p, "  ");
+    size_t partLen = end ? (size_t)(end - p) : strlen(p);
+    if (partLen <= width) {
+      emit(p, partLen);
+    } else {
+      // Word-wrap the part at single spaces.
+      const char* q = p;
+      const char* partEnd = p + partLen;
+      while (q < partEnd && n < maxOut) {
+        while (q < partEnd && *q == ' ') ++q;
+        const char* cut = q;
+        const char* lastSpace = nullptr;
+        while (cut < partEnd && (size_t)(cut - q) < width) {
+          if (*cut == ' ') lastSpace = cut;
+          ++cut;
+        }
+        if (cut < partEnd && *cut != ' ' && lastSpace) cut = lastSpace;  // don't split a word
+        emit(q, (size_t)(cut - q));
+        q = cut;
+      }
+    }
+    if (!end) break;
+    p = end;
+    while (*p == ' ') ++p;
+  }
+  return n;
+}
+
 }  // namespace weather

@@ -81,7 +81,13 @@ constexpr double DEFAULT_LATITUDE = 42.0308;
 constexpr double DEFAULT_LONGITUDE = -93.6319;
 
 // How weather screens move: "rotate" scrolls each one right to left.
-const char* WEATHER_SCROLL_MODE = "rotate";
+// How weather screens appear: "rotate" scrolls each one right to left, one
+// after another; "hold" shows each screen still and switches to the next.
+const char* WEATHER_SCREEN_MODE = "rotate";
+
+// About 13 characters fit across the 80-column display. With "hold", wider
+// screens are split into several held screens so nothing is cut off.
+constexpr size_t SIGN_WIDTH_CHARS = 13;
 
 constexpr size_t MAX_MESSAGE_LEN = 240;
 
@@ -322,8 +328,8 @@ bool sendPages(const alpha::Page* pages, size_t count, const alpha::TextOptions&
       // Same screens and modes as the Alpha path: each page keeps its own
       // mode field, so the weather screens each scroll right to left, one
       // after another.
-      j1587::Page jp[weather::MAX_PAGES];
-      size_t n = count < weather::MAX_PAGES ? count : weather::MAX_PAGES;
+      j1587::Page jp[weather::MAX_SCREENS];
+      size_t n = count < weather::MAX_SCREENS ? count : weather::MAX_SCREENS;
       for (size_t i = 0; i < n; ++i) {
         int m = pages[i].mode;
         bool valid = m >= 0 && (size_t)m < alpha::MODE_COUNT;
@@ -563,13 +569,26 @@ void showWeather(bool force) {
                                  weather::MAX_PAGES);
   }
 
-  // Every screen scrolls right to left, one after another.
-  alpha::Page pages[weather::MAX_PAGES];
-  String summary;
+  // Each screen is shown in turn. Held screens must fit the display, so wide
+  // ones are split into several screens first.
+  int mode = alpha::findMode(WEATHER_SCREEN_MODE);
+  bool held = mode != alpha::findMode("rotate") && mode != alpha::findMode("compressed");
+  char screens[weather::MAX_SCREENS][weather::PAGE_LEN];
+  size_t screenCount = 0;
   for (size_t i = 0; i < count; ++i) {
-    pages[i] = {lines[i], alpha::findMode(WEATHER_SCROLL_MODE)};
-    summary += (i ? " | " : "") + String(lines[i]);
+    if (held) {
+      screenCount = weather::fitScreens(lines[i], SIGN_WIDTH_CHARS, screens, screenCount, weather::MAX_SCREENS);
+    } else if (screenCount < weather::MAX_SCREENS) {
+      strcpy(screens[screenCount++], lines[i]);
+    }
   }
+  alpha::Page pages[weather::MAX_SCREENS];
+  String summary;
+  for (size_t i = 0; i < screenCount; ++i) {
+    pages[i] = {screens[i], mode};
+    summary += (i ? " | " : "") + String(screens[i]);
+  }
+  count = screenCount;
 
   // Writing a TEXT file blanks the sign briefly, so only write on change
   // (plus an hourly refresh in case the sign was power cycled on its own).

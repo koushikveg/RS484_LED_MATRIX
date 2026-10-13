@@ -271,9 +271,11 @@ shown on the web page or in `/status`.
 | Precipitation: type, amount and chance on one screen | `RAIN 0.30 IN  40% CHANCE` | When today's chance of precipitation is **above 5%** |
 | Clouds: how cloudy the sky is | `MOSTLY CLOUDY  70% CLOUD COVER` | Instead of precipitation, when the chance is **5% or less** |
 
-- Every screen scrolls right to left. To change that, set `WEATHER_SCROLL_MODE`
+- Every screen scrolls right to left. To change that, set `WEATHER_SCREEN_MODE`
   at the top of `led_sign.ino` to another mode from `/help`, e.g. `"hold"`.
-  (`/mode` only affects typed messages.)
+  (`/mode` only affects typed messages.) With `"hold"`, screens wider than the
+  sign's ~13 characters are split into several held screens, e.g.
+  `NOW 62F` → `HIGH 66F` → `LOW 51F`, so nothing is cut off.
 - **Type** comes from Open-Meteo's forecast for today: whichever of rain
   (including showers) and snowfall has an amount forecast. If neither has an
   amount, today's weather code decides. The precipitation screen can read:
