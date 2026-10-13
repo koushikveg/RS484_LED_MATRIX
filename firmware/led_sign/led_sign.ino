@@ -66,6 +66,11 @@ constexpr uint32_t WEATHER_RETRY_MS = 60UL * 1000;        // first retry after a
 constexpr uint32_t WEATHER_STALE_MS = 3UL * 60 * 60 * 1000;  // stop showing data older than this
 constexpr uint32_t WEATHER_RESEND_MS = 60UL * 60 * 1000;     // re-send hourly in case the sign lost power
 
+// Sign address used until you set another one with /addr. The sign shows
+// its address at power-up ("ADDRESS = 01"). "00" is the Alpha broadcast
+// address, but not every sign firmware listens to it.
+const char* DEFAULT_SIGN_ADDRESS = "01";
+
 // Weather location used until you set another one (/location or the web
 // page). Ames, Iowa.
 const char* DEFAULT_PLACE = "AMES";
@@ -173,6 +178,8 @@ alpha::TextOptions currentOptions() {
 
 void saveSettings() {
   prefs.putUInt("baud", settings.baud);
+  prefs.putString("addr", settings.text.address);
+  prefs.putUChar("type", (uint8_t)settings.text.typeCode);
   prefs.putUChar("format", settings.format);
   prefs.putInt("mode", settings.text.mode);
   prefs.putInt("color", settings.text.color);
@@ -207,6 +214,12 @@ void loadSettings() {
   settings.placeName = prefs.getString("place", settings.placeName);
   settings.showPlace = prefs.getBool("showplace", true);
   settings.fahrenheit = prefs.getBool("fahrenheit", true);
+  String addr = prefs.getString("addr", DEFAULT_SIGN_ADDRESS);
+  if (addr.length() == 2) {
+    settings.text.address[0] = addr[0];
+    settings.text.address[1] = addr[1];
+  }
+  settings.text.typeCode = (char)prefs.getUChar("type", (uint8_t)alpha::TYPE_ALL);
   if (settings.text.mode >= (int)alpha::MODE_COUNT) settings.text.mode = 0;
   if (settings.text.color >= (int)alpha::COLOR_COUNT) settings.text.color = -1;
 }
@@ -434,35 +447,42 @@ void clearPriority() {
 // sign. Watch the sign: whichever text appears tells you what works.
 void runProbe() {
   static const uint32_t BAUDS[] = {9600, 4800, 2400, 1200, 19200, 38400};
+  static const char* ADDRESSES[] = {"01", "00"};
   uint32_t savedBaud = settings.baud;
   uint8_t savedFormat = settings.format;
 
   alpha::TextOptions opts;
   opts.mode = alpha::findMode("hold");
+  opts.typeCode = settings.text.typeCode;
 
   Serial.println("Probing; watch the sign. Press Enter in this monitor to stop.");
   for (size_t f = 0; f < FORMAT_COUNT; ++f) {
     for (uint32_t baud : BAUDS) {
-      settings.baud = baud;
-      settings.format = f;
-      applySerialSettings();
-      char text[32];
-      snprintf(text, sizeof(text), "%lu %s", (unsigned long)baud, FORMATS[f].name);
-      Serial.printf("  trying %s\n", text);
-      sendText(text, opts);
+      for (const char* addr : ADDRESSES) {
+        settings.baud = baud;
+        settings.format = f;
+        applySerialSettings();
+        opts.address[0] = addr[0];
+        opts.address[1] = addr[1];
+        char text[32];
+        snprintf(text, sizeof(text), "%lu %s A%s", (unsigned long)baud, FORMATS[f].name, addr);
+        Serial.printf("  trying %s\n", text);
+        sendText(text, opts);
 
-      uint32_t start = millis();
-      while (millis() - start < 5000) {
-        server.handleClient();
-        if (Serial.available()) {
-          while (Serial.available()) Serial.read();
-          Serial.printf("Stopped at %s. Use /baud and /fmt to keep it.\n", text);
-          settings.baud = savedBaud;
-          settings.format = savedFormat;
-          applySerialSettings();
-          return;
+        uint32_t start = millis();
+        while (millis() - start < 4000) {
+          server.handleClient();
+          if (Serial.available()) {
+            while (Serial.available()) Serial.read();
+            Serial.printf("Stopped at %s. Keep it with /baud %lu, /fmt %s and /addr %s.\n", text,
+                          (unsigned long)baud, FORMATS[f].name, addr);
+            settings.baud = savedBaud;
+            settings.format = savedFormat;
+            applySerialSettings();
+            return;
+          }
+          delay(10);
         }
-        delay(10);
       }
     }
   }
@@ -520,6 +540,7 @@ void printStatus() {
   Serial.printf("priority : %s\n", settings.usePriority ? "on" : "off");
   Serial.printf("serial   : %lu %s, checksum %s\n", (unsigned long)settings.baud,
                 FORMATS[settings.format].name, t.checksum ? "on" : "off");
+  Serial.printf("address  : %c%c (sign type %c)\n", t.address[0], t.address[1], t.typeCode);
   if (WiFi.status() == WL_CONNECTED) {
     Serial.printf("wifi     : \"%s\" at %s (http://%s.local)\n", settings.wifiSsid.c_str(),
                   WiFi.localIP().toString().c_str(), MDNS_NAME);
@@ -564,7 +585,9 @@ void printHelp() {
       "  /baud <rate>       1200 2400 4800 9600 19200 38400\n"
       "  /fmt 7E2|8N1       serial framing\n"
       "  /checksum on|off   append a checksum to each packet\n"
-      "  /probe             try every baud/format combination\n"
+      "  /addr <00-FF>      sign address (shown at power-up; 00 = broadcast)\n"
+      "  /type <char>       sign type code (Z = all signs, 1 = one-line signs)\n"
+      "  /probe             try every baud/format/address combination\n"
       "  /sniff             toggle printing bytes received from the bus\n"
       "\n"
       "  /resend  /status  /help\n");
@@ -677,6 +700,20 @@ void handleCommand(String line) {
       }
     }
     Serial.println("! format must be 7E2 or 8N1");
+  } else if (cmd == "/addr") {
+    arg.toUpperCase();
+    bool ok = arg.length() == 2 && isxdigit((unsigned char)arg[0]) && isxdigit((unsigned char)arg[1]);
+    if (!ok) return (void)Serial.println("! usage: /addr 01 (two hex digits, 00 = broadcast)");
+    settings.text.address[0] = arg[0];
+    settings.text.address[1] = arg[1];
+    saveSettings();
+    refreshDisplay();
+  } else if (cmd == "/type") {
+    if (arg.length() != 1 || arg[0] < 0x20 || arg[0] > 0x7E)
+      return (void)Serial.println("! usage: /type Z (one character, e.g. Z = all signs, 1 = one-line signs)");
+    settings.text.typeCode = arg[0];
+    saveSettings();
+    refreshDisplay();
   } else if (cmd == "/checksum") {
     settings.text.checksum = arg.equalsIgnoreCase("on");
     saveSettings();
