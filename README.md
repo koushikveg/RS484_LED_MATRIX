@@ -243,20 +243,40 @@ shown on the web page or in `/status`.
 
 1. **Wi-Fi:** connect it first (see [Connecting to Wi-Fi](#connecting-to-wi-fi)).
 
-2. **Location:** it's preset to **Ames, Iowa** (42.0308, −93.6319, shown as
-   `AMES`), so there's nothing to do. To change it, use a city name:
+2. **Location:** it's preset to **Ames, Iowa, US** (42.0308, −93.6319, shown as
+   `AMES`), so there's nothing to do. To change it, type the city, then
+   optionally the state/province and the country, separated by commas, in
+   the **Weather** box on `http://ledsign.local` or in the Serial Monitor:
    ```
-   /location Des Moines
+   /location Des Moines, Iowa, US
+   /location Des Moines, IA, USA
+   /location Springfield, Illinois, United States of America
+   /location Paris, France
+   /location Paris, Texas
+   /location Toronto, ON, Canada
    ```
-   Use only the city name. Open-Meteo's search doesn't understand "Des Moines, IA". If it
-   picks the wrong place, use coordinates instead (right-click a spot in Google
-   Maps to copy them). The optional label is what the sign shows:
+   - The city comes first and is required. The state and country are optional,
+     but they pick the right place when several cities share a name.
+   - States and provinces can be written in full or abbreviated (`Iowa` or `IA`).
+     This covers US states, Canadian provinces and Australian states.
+   - Countries can be written as a code or a name. For the United States, `US`,
+     `USA`, `U.S.A.`, `United States` and `United States of America` all work.
+     `UK`, `Great Britain` and `GB` all work for the United Kingdom.
+   - Upper/lower case and accents don't matter (`zurich` finds Zürich).
+   - With two parts, the second can be a state or a country. `Atlanta, Georgia`
+     finds the US state and `Tbilisi, Georgia` finds the country.
+
+   If the city exists but not in the state/country you typed, the sign keeps its
+   old location. The Serial Monitor and web page then list the places it did find.
+   You can also use coordinates (right-click a spot in Google Maps to copy them).
+   The optional label is what the sign shows:
    ```
    /latlon 42.0308 -93.6319 AMES
    ```
    Setting a location switches the sign to weather mode and fetches right away.
-   To change the built-in default, edit `DEFAULT_PLACE`, `DEFAULT_LATITUDE` and
-   `DEFAULT_LONGITUDE` at the top of `led_sign.ino`.
+   To change the built-in default, edit `DEFAULT_PLACE`, `DEFAULT_PLACE_QUERY`,
+   `DEFAULT_PLACE_DETAIL`, `DEFAULT_LATITUDE` and `DEFAULT_LONGITUDE` at the top
+   of `led_sign.ino`.
 
 3. **Optional:** `/units c` for Celsius, `/showplace off` to drop the city
    name from the cycle.
@@ -321,7 +341,7 @@ Type any text and press Enter to display it (this turns weather off). Commands:
 | Command | Effect |
 |---|---|
 | `/ssid <name>`, `/pass <password>` | Home Wi-Fi network and password (saved; reconnects) |
-| `/location <city>` | Look up a city and show its weather (default: Ames, Iowa) |
+| `/location <city>[, <state>][, <country>]` | Look up a place and show its weather, e.g. `/location Ames, Iowa, US` (default) |
 | `/latlon <lat> <lon> [label]` | Set the weather location by coordinates |
 | `/units f\|c` | Fahrenheit or Celsius |
 | `/showplace on\|off` | Include the city name in the cycle |
@@ -350,7 +370,7 @@ lets you:
 - set the **scroll speed** (1 = slowest … 5 = fastest, or the sign's default)
   for everything on the sign. It's saved, and what's showing is re-sent at
   the new speed straight away. Same as `/speed` in the Serial Monitor;
-- set the city and units and switch to weather;
+- set the location (`City, State, Country`) and units and switch to weather;
 - send a message with a mode, colour and priority;
 - change the home Wi-Fi network.
 
@@ -437,6 +457,7 @@ Open-Meteo-shaped responses, including `null` values and accented place names:
 g++ -std=c++11 -Wall -Wextra -I firmware/led_sign test/test_alpha.cpp -o test_alpha && ./test_alpha
 g++ -std=c++11 -Wall -Wextra -I firmware/led_sign test/test_weather.cpp -o test_weather && ./test_weather
 g++ -std=c++11 -Wall -Wextra -I firmware/led_sign test/test_j1587.cpp -o test_j1587 && ./test_j1587
+g++ -std=c++11 -Wall -Wextra -I firmware/led_sign test/test_geocode.cpp -o test_geocode && ./test_geocode
 ```
 
 `test_j1587` checks the J1587 packets byte for byte against the known-good

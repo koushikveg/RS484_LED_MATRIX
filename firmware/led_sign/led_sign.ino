@@ -28,6 +28,7 @@
 #include <WiFiClientSecure.h>
 
 #include "AlphaSign.h"
+#include "Geocode.h"
 #include "J1587Sign.h"
 #include "Weather.h"
 
@@ -77,6 +78,8 @@ const char* DEFAULT_SIGN_ADDRESS = "01";
 // Weather location used until you set another one (/location or the web
 // page). Ames, Iowa.
 const char* DEFAULT_PLACE = "AMES";
+const char* DEFAULT_PLACE_QUERY = "Ames, Iowa, US";
+const char* DEFAULT_PLACE_DETAIL = "IOWA, UNITED STATES";
 constexpr double DEFAULT_LATITUDE = 42.0308;
 constexpr double DEFAULT_LONGITUDE = -93.6319;
 
@@ -133,7 +136,9 @@ struct Settings {
   bool weatherOn = true;
   double latitude = DEFAULT_LATITUDE;
   double longitude = DEFAULT_LONGITUDE;
-  String placeName = DEFAULT_PLACE;
+  String placeName = DEFAULT_PLACE;           // label shown on the sign
+  String placeQuery = DEFAULT_PLACE_QUERY;    // what was typed, e.g. "Ames, IA, USA"
+  String placeDetail = DEFAULT_PLACE_DETAIL;  // matched state and country
   bool showPlace = true;
   bool fahrenheit = true;
 };
@@ -435,6 +440,8 @@ void saveSettings() {
   prefs.putDouble("lat", settings.latitude);
   prefs.putDouble("lon", settings.longitude);
   prefs.putString("place", settings.placeName);
+  prefs.putString("placeq", settings.placeQuery);
+  prefs.putString("placed", settings.placeDetail);
   prefs.putBool("showplace", settings.showPlace);
   prefs.putBool("fahrenheit", settings.fahrenheit);
 }
@@ -454,6 +461,13 @@ void loadSettings() {
   settings.latitude = prefs.getDouble("lat", settings.latitude);
   settings.longitude = prefs.getDouble("lon", settings.longitude);
   settings.placeName = prefs.getString("place", settings.placeName);
+  if (prefs.isKey("placeq")) {
+    settings.placeQuery = prefs.getString("placeq", settings.placeQuery);
+    settings.placeDetail = prefs.getString("placed", settings.placeDetail);
+  } else if (settings.placeName != DEFAULT_PLACE) {
+    settings.placeQuery = settings.placeName;  // saved by an older version
+    settings.placeDetail = "";
+  }
   settings.showPlace = prefs.getBool("showplace", true);
   settings.fahrenheit = prefs.getBool("fahrenheit", true);
   settings.protocol = prefs.getUChar("proto", PROTO_J1587) == PROTO_ALPHA ? PROTO_ALPHA : PROTO_J1587;
@@ -581,20 +595,59 @@ bool fetchWeather() {
 
 // Looks up a place name with Open-Meteo geocoding and makes it the weather
 // location.
-bool setLocationByName(const String& name, String& error) {
-  char url[256];
-  weather::geocodeUrl(url, sizeof(url), name.c_str());
-  String body;
-  weather::Place place;
-  if (!httpGet(url, body, error)) return false;
-  if (!weather::parsePlace(body.c_str(), place)) {
-    error = "no place called \"" + name + "\" (use just the city name, or /latlon)";
+// Looks up "City", "City, State", "City, Country" or "City, State, Country"
+// with Open-Meteo geocoding and makes the best match the weather location.
+// See Geocode.h for the accepted state and country spellings.
+bool setLocationByName(const String& input, String& error) {
+  geo::Query q;
+  if (!geo::parseQuery(input.c_str(), q)) {
+    error = "enter a city, e.g. Ames, Iowa, US";
     return false;
   }
-  settings.latitude = place.latitude;
-  settings.longitude = place.longitude;
-  settings.placeName = place.name;
-  Serial.printf("Location: %s (%.4f, %.4f)\n", place.name, place.latitude, place.longitude);
+  static geo::Place places[geo::MAX_RESULTS];  // static: keep it off the stack
+  char url[320];
+  String body;
+  size_t n = 0;
+
+  // With a recognised country, ask Open-Meteo to search only that country
+  // first; fall back to a plain search if that fails or finds nothing.
+  bool byCountry = geo::queryCountryCode(q) != nullptr;
+  if (byCountry) {
+    geo::searchUrl(url, sizeof(url), q, true);
+    String err;
+    if (httpGet(url, body, err)) n = geo::parsePlaces(body.c_str(), places, geo::MAX_RESULTS);
+  }
+  if (n == 0) {
+    geo::searchUrl(url, sizeof(url), q, false);
+    if (!httpGet(url, body, error)) return false;
+    n = geo::parsePlaces(body.c_str(), places, geo::MAX_RESULTS);
+  }
+  if (n == 0) {
+    error = String("no place called \"") + q.city + "\"";
+    return false;
+  }
+
+  int i = geo::pick(q, places, n);
+  if (i < 0) {
+    error = String("found \"") + q.city + "\" but not in that state/country. Did you mean: ";
+    char detail[2 * geo::FIELD_LEN + 4];
+    for (size_t k = 0; k < n && k < 4; ++k) {
+      geo::describePlace(places[k], detail, sizeof(detail));
+      error += String(k ? "; " : "") + places[k].name + ", " + detail;
+    }
+    return false;
+  }
+
+  const geo::Place& pl = places[i];
+  char detail[2 * geo::FIELD_LEN + 4];
+  geo::describePlace(pl, detail, sizeof(detail));
+  settings.latitude = pl.latitude;
+  settings.longitude = pl.longitude;
+  settings.placeName = pl.name;
+  settings.placeDetail = detail;
+  settings.placeQuery = input;
+  settings.placeQuery.trim();
+  Serial.printf("Location: %s, %s (%.4f, %.4f)\n", pl.name, detail, pl.latitude, pl.longitude);
   return true;
 }
 
@@ -782,6 +835,7 @@ void pollSniffer() {
 String weatherStatus() {
   if (!hasLocation()) return "no location set";
   String s = settings.placeName.length() ? settings.placeName : String("custom");
+  if (settings.placeDetail.length()) s += ", " + settings.placeDetail;
   s += " (" + String(settings.latitude, 4) + ", " + String(settings.longitude, 4) + "), ";
   s += settings.fahrenheit ? "F" : "C";
   if (haveForecast) s += ", updated " + String((millis() - lastFetchOkAt) / 60000) + " min ago";
@@ -836,7 +890,8 @@ void printHelp() {
       "  /pass <password>      home Wi-Fi password, then connects\n"
       "\n"
       " Weather\n"
-      "  /location <city>      look up a city by name, e.g. /location Milwaukee\n"
+      "  /location <city>[, <state>][, <country>]  e.g. /location Ames, Iowa, US\n"
+      "                     (states: name or IA/ON/NSW; countries: US, USA, United States...)\n"
       "  /latlon <lat> <lon> [label]  set coordinates directly\n"
       "  /units f|c            Fahrenheit or Celsius\n"
       "  /showplace on|off     include the place name in the cycle\n"
@@ -903,7 +958,7 @@ void handleCommand(String line) {
     connectHomeWifi();
 
   } else if (cmd == "/location") {
-    if (arg.isEmpty()) return (void)Serial.println("! usage: /location <city>");
+    if (arg.isEmpty()) return (void)Serial.println("! usage: /location <city>, <state>, <country>");
     String error;
     if (!setLocationByName(arg, error)) return (void)Serial.printf("! %s\n", error.c_str());
     haveForecast = false;
@@ -918,6 +973,8 @@ void handleCommand(String line) {
     settings.longitude = lon;
     settings.placeName = label;
     settings.placeName.toUpperCase();
+    settings.placeQuery = "";
+    settings.placeDetail = "";
     haveForecast = false;
     setWeatherMode(true);
   } else if (cmd == "/units") {
@@ -1142,8 +1199,9 @@ void handleRoot() {
 
   // Weather
   html += F("<h2>Weather</h2><form method='post' action='/weather'>"
-            "<label>City <small>(name only, e.g. Milwaukee)</small><input name='location' value='");
-  html += htmlEscape(settings.placeName);
+            "<label>City, state, country <small>(e.g. Ames, Iowa, US or Paris, France)</small>"
+            "<input name='location' value='");
+  html += htmlEscape(settings.placeQuery.length() ? settings.placeQuery : settings.placeName);
   html += F("'></label><div class='row'><label>Units<select name='units'>");
   html += option("f", "&deg;F", settings.fahrenheit) + option("c", "&deg;C", !settings.fahrenheit);
   html += F("</select></label><label><br><input type='checkbox' name='showplace'");
@@ -1190,10 +1248,13 @@ void handleWeather() {
   String location = server.arg("location");
   location.trim();
   String notice;
-  if (location.length() && !location.equalsIgnoreCase(settings.placeName)) {
+  if (location.length() && !location.equalsIgnoreCase(settings.placeQuery) &&
+      !location.equalsIgnoreCase(settings.placeName)) {
     String error;
     if (!setLocationByName(location, error)) return redirectHome("Couldn't set location: " + error);
-    notice = "Location set to " + settings.placeName + ".";
+    notice = "Location set to " + settings.placeName;
+    if (settings.placeDetail.length()) notice += ", " + settings.placeDetail;
+    notice += ".";
   }
   if (!hasLocation()) return redirectHome("Enter a city first.");
   haveForecast = false;
