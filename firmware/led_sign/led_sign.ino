@@ -187,6 +187,26 @@ void runTxTest(uint32_t seconds) {
   Serial.println("TX test done (driver off). Measure A-B again to compare.");
 }
 
+// Slowly toggles a GPIO (default: the RS-485 TX pin) with the driver on, so a
+// multimeter across A and B shows whether that pin really reaches the
+// transceiver's data input, and with which polarity.
+void runTxFlip(int pin) {
+  Serial.printf("Toggling GPIO%d every 2 s with the driver on. Watch DC volts between A and B.\n", pin);
+  SignSerial.end();
+  pinMode(pin, OUTPUT);
+  driverEnable(true);
+  for (int i = 0; i < 6; ++i) {
+    bool high = (i % 2) == 0;
+    digitalWrite(pin, high ? HIGH : LOW);
+    Serial.printf("  GPIO%d %s -> note the A-B reading\n", pin, high ? "HIGH" : "LOW ");
+    delay(2000);
+  }
+  driverEnable(false);
+  pinMode(pin, INPUT);
+  applySerialSettings();
+  Serial.println("Flip test done.");
+}
+
 bool sendPages(const alpha::Page* pages, size_t count, const alpha::TextOptions& opts) {
   uint8_t packet[MAX_MESSAGE_LEN + 160];
   size_t len = alpha::buildWriteTextPages(packet, sizeof(packet), opts, pages, count);
@@ -635,6 +655,7 @@ void printHelp() {
       "  /probe             try every baud/format/address combination\n"
       "  /de <pin|-1> [high|low]  RS-485 driver-enable pin and polarity\n"
       "  /txtest [seconds]  drive the bus for a multimeter check (default 10 s)\n"
+      "  /txflip [gpio]     toggle the TX pin slowly for a multimeter check\n"
       "  /sniff             toggle printing bytes received from the bus\n"
       "\n"
       "  /resend  /status  /help\n");
@@ -782,6 +803,15 @@ void handleCommand(String line) {
   } else if (cmd == "/txtest") {
     long secs = arg.length() ? arg.toInt() : 10;
     runTxTest(secs > 0 && secs <= 60 ? secs : 10);
+  } else if (cmd == "/txflip") {
+    long pin = arg.length() ? arg.toInt() : RS485_TX_PIN;
+    bool numeric = true;
+    for (size_t i = 0; i < arg.length(); ++i)
+      if (!isdigit((unsigned char)arg[i])) numeric = false;
+    // GPIO19/20 are the USB port; toggling them would cut this monitor off.
+    if (!numeric || pin < 0 || pin > 48 || pin == 19 || pin == 20 || pin == dePin)
+      return (void)Serial.println("! usage: /txflip or /txflip <gpio> (not 19, 20 or the DE pin)");
+    runTxFlip((int)pin);
   } else if (cmd == "/checksum") {
     settings.text.checksum = arg.equalsIgnoreCase("on");
     saveSettings();
