@@ -45,6 +45,8 @@
 constexpr int RS485_RX_PIN = 18;
 constexpr int RS485_TX_PIN = 17;
 constexpr int RS485_DE_PIN = 21;  // -1 if the transceiver switches direction itself
+// Default driver-enable polarity; both can be changed at runtime with /de.
+constexpr bool RS485_DE_ACTIVE_HIGH = true;
 
 // Home Wi-Fi. You can leave these blank and set them later with /ssid and
 // /pass (or from the web page); saved values take priority over these.
@@ -140,16 +142,49 @@ bool hasLocation() { return !isnan(settings.latitude) && !isnan(settings.longitu
 
 // ---------------------------------------------------------------- RS-485 I/O
 
+// Driver-enable pin and polarity (runtime-configurable with /de, saved).
+int dePin = RS485_DE_PIN;
+bool deActiveHigh = RS485_DE_ACTIVE_HIGH;
+
+void driverEnable(bool on) {
+  if (dePin >= 0) digitalWrite(dePin, on == deActiveHigh ? HIGH : LOW);
+}
+
+// Sets up the driver-enable pin, releasing the previous one if it changed.
+void applyDePin(int oldPin) {
+  if (oldPin >= 0 && oldPin != dePin) pinMode(oldPin, INPUT);
+  if (dePin >= 0) {
+    pinMode(dePin, OUTPUT);
+    driverEnable(false);  // listen by default
+  }
+}
+
 void applySerialSettings() {
   SignSerial.end();
   SignSerial.begin(settings.baud, FORMATS[settings.format].config, RS485_RX_PIN, RS485_TX_PIN);
 }
 
 void sendBytes(const uint8_t* data, size_t len) {
-  if (RS485_DE_PIN >= 0) digitalWrite(RS485_DE_PIN, HIGH);
+  driverEnable(true);
   SignSerial.write(data, len);
   SignSerial.flush();  // block until the last stop bit has left the UART
-  if (RS485_DE_PIN >= 0) digitalWrite(RS485_DE_PIN, LOW);
+  driverEnable(false);
+}
+
+// Holds the RS-485 driver on and streams 0x00 bytes so a multimeter across
+// A and B shows whether the board is really driving the bus.
+void runTxTest(uint32_t seconds) {
+  Serial.printf("Driving the bus for %lu s: measure DC volts between A and B now.\n",
+                (unsigned long)seconds);
+  static const uint8_t zeros[64] = {0};
+  driverEnable(true);
+  uint32_t start = millis();
+  while (millis() - start < seconds * 1000UL) {
+    SignSerial.write(zeros, sizeof(zeros));
+    SignSerial.flush();
+  }
+  driverEnable(false);
+  Serial.println("TX test done (driver off). Measure A-B again to compare.");
 }
 
 bool sendPages(const alpha::Page* pages, size_t count, const alpha::TextOptions& opts) {
@@ -178,6 +213,8 @@ alpha::TextOptions currentOptions() {
 
 void saveSettings() {
   prefs.putUInt("baud", settings.baud);
+  prefs.putInt("depin", dePin);
+  prefs.putBool("dehigh", deActiveHigh);
   prefs.putString("addr", settings.text.address);
   prefs.putUChar("type", (uint8_t)settings.text.typeCode);
   prefs.putUChar("format", settings.format);
@@ -214,6 +251,8 @@ void loadSettings() {
   settings.placeName = prefs.getString("place", settings.placeName);
   settings.showPlace = prefs.getBool("showplace", true);
   settings.fahrenheit = prefs.getBool("fahrenheit", true);
+  dePin = prefs.getInt("depin", RS485_DE_PIN);
+  deActiveHigh = prefs.getBool("dehigh", RS485_DE_ACTIVE_HIGH);
   String addr = prefs.getString("addr", DEFAULT_SIGN_ADDRESS);
   if (addr.length() == 2) {
     settings.text.address[0] = addr[0];
@@ -541,6 +580,12 @@ void printStatus() {
   Serial.printf("serial   : %lu %s, checksum %s\n", (unsigned long)settings.baud,
                 FORMATS[settings.format].name, t.checksum ? "on" : "off");
   Serial.printf("address  : %c%c (sign type %c)\n", t.address[0], t.address[1], t.typeCode);
+  if (dePin >= 0) {
+    Serial.printf("rs485    : RX %d, TX %d, DE %d active %s\n", RS485_RX_PIN, RS485_TX_PIN, dePin,
+                  deActiveHigh ? "HIGH" : "LOW");
+  } else {
+    Serial.printf("rs485    : RX %d, TX %d, no DE pin\n", RS485_RX_PIN, RS485_TX_PIN);
+  }
   if (WiFi.status() == WL_CONNECTED) {
     Serial.printf("wifi     : \"%s\" at %s (http://%s.local)\n", settings.wifiSsid.c_str(),
                   WiFi.localIP().toString().c_str(), MDNS_NAME);
@@ -588,6 +633,8 @@ void printHelp() {
       "  /addr <00-FF>      sign address (shown at power-up; 00 = broadcast)\n"
       "  /type <char>       sign type code (Z = all signs, 1 = one-line signs)\n"
       "  /probe             try every baud/format/address combination\n"
+      "  /de <pin|-1> [high|low]  RS-485 driver-enable pin and polarity\n"
+      "  /txtest [seconds]  drive the bus for a multimeter check (default 10 s)\n"
       "  /sniff             toggle printing bytes received from the bus\n"
       "\n"
       "  /resend  /status  /help\n");
@@ -714,6 +761,27 @@ void handleCommand(String line) {
     settings.text.typeCode = arg[0];
     saveSettings();
     refreshDisplay();
+  } else if (cmd == "/de") {
+    int sp = arg.indexOf(' ');
+    String pinArg = sp < 0 ? arg : arg.substring(0, sp);
+    String polArg = sp < 0 ? "" : arg.substring(sp + 1);
+    polArg.trim();
+    bool numeric = pinArg.length() > 0;
+    for (size_t i = 0; i < pinArg.length(); ++i)
+      if (!isdigit((unsigned char)pinArg[i]) && !(i == 0 && pinArg[i] == '-')) numeric = false;
+    if (!numeric || (polArg.length() && !polArg.equalsIgnoreCase("high") && !polArg.equalsIgnoreCase("low")))
+      return (void)Serial.println("! usage: /de 21 high, /de 21 low, or /de -1 (no pin)");
+    long pin = pinArg.toInt();
+    if (pin < -1 || pin > 48) return (void)Serial.println("! pin must be -1 to 48");
+    int oldPin = dePin;
+    dePin = (int)pin;
+    if (polArg.length()) deActiveHigh = polArg.equalsIgnoreCase("high");
+    applyDePin(oldPin);
+    saveSettings();
+    printStatus();
+  } else if (cmd == "/txtest") {
+    long secs = arg.length() ? arg.toInt() : 10;
+    runTxTest(secs > 0 && secs <= 60 ? secs : 10);
   } else if (cmd == "/checksum") {
     settings.text.checksum = arg.equalsIgnoreCase("on");
     saveSettings();
@@ -915,13 +983,10 @@ void startWebServer() {
 
 void setup() {
   Serial.begin(115200);
-  if (RS485_DE_PIN >= 0) {
-    pinMode(RS485_DE_PIN, OUTPUT);
-    digitalWrite(RS485_DE_PIN, LOW);  // listen by default
-  }
 
   prefs.begin("ledsign", false);
   loadSettings();
+  applyDePin(-1);
   applySerialSettings();
   startWifi();
   startWebServer();
