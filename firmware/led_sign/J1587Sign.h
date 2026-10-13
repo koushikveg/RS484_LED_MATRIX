@@ -35,6 +35,7 @@ constexpr char CMD_WRITE_TEXT = 'A';
 constexpr char FILE_LABEL = 'B';  // file used by the known-good program
 constexpr uint8_t ESC = 0x1B;
 constexpr uint8_t EOT = 0x04;
+constexpr uint8_t SPEED_1 = 0x15;  // Alpha speed codes: 0x15 (slowest) .. 0x19 (fastest)
 
 constexpr size_t MAX_FRAME = 21;  // J1708 limit, including MID and checksum
 // Data bytes per PID 198 segment: 21 - MID - PID - count - dest - seg# - checksum
@@ -83,12 +84,13 @@ inline size_t buildRts(uint8_t* out, uint8_t segments) {
 // after another, e.g. each scrolling right to left with mode 'a' (rotate).
 struct Page {
   const char* text;
-  char mode;     // Alpha mode code, e.g. 'a' = rotate; 0 = no mode field
-  char special;  // special-mode specifier when mode == 'n', else 0
+  char mode;      // Alpha mode code, e.g. 'a' = rotate; 0 = no mode field
+  char special;   // special-mode specifier when mode == 'n', else 0
+  uint8_t speed;  // 1 (slowest) .. 5 (fastest); 0 = sign default
 };
 
 // Builds the Alpha-style text payload:
-//   'A' FileLabel { [ESC 0x20 mode [special]] text }... EOT
+//   'A' FileLabel { [ESC 0x20 mode [special]] [speed] text }... EOT
 // Only printable ASCII (0x20-0x7E) from the page text is copied. Returns the
 // payload length, or 0 if it doesn't fit in `cap`.
 inline size_t buildPayloadPages(uint8_t* out, size_t cap, const Page* pages, size_t count) {
@@ -106,6 +108,7 @@ inline size_t buildPayloadPages(uint8_t* out, size_t cap, const Page* pages, siz
       put((uint8_t)pages[i].mode);
       if (pages[i].special) put((uint8_t)pages[i].special);
     }
+    if (pages[i].speed >= 1 && pages[i].speed <= 5) put((uint8_t)(SPEED_1 + pages[i].speed - 1));
     for (const char* p = pages[i].text; p && *p; ++p) {
       uint8_t c = (uint8_t)*p;
       if (c >= 0x20 && c <= 0x7E) put(c);
@@ -117,7 +120,7 @@ inline size_t buildPayloadPages(uint8_t* out, size_t cap, const Page* pages, siz
 
 // Single-page payload: 'A' FileLabel [ESC 0x20 mode] text EOT.
 inline size_t buildPayload(uint8_t* out, size_t cap, const char* text, char mode) {
-  Page page = {text, mode, 0};
+  Page page = {text, mode, 0, 0};
   return buildPayloadPages(out, cap, &page, 1);
 }
 

@@ -68,7 +68,7 @@ int main() {
 
   // ---- weather-style screens: each keeps its own scroll mode, in order
   {
-    j1587::Page pages[] = {{"AMES", 'a', 0}, {"NOW 62F  HIGH 66F  LOW 51F", 'a', 0}, {"X", 'n', '7'}};
+    j1587::Page pages[] = {{"AMES", 'a', 0, 0}, {"NOW 62F  HIGH 66F  LOW 51F", 'a', 0, 0}, {"X", 'n', '7', 0}};
     uint8_t payload[j1587::MAX_PAYLOAD];
     size_t plen = j1587::buildPayloadPages(payload, sizeof(payload), pages, 3);
     std::vector<uint8_t> expected = {'A', 'B', 0x1B, 0x20, 'a', 'A', 'M', 'E', 'S', 0x1B, 0x20, 'a'};
@@ -79,6 +79,19 @@ int main() {
     CHECK(bytes(payload, plen) == expected);
     CHECK(plen == 44);  // 2 + (3+4) + (3+26) + (4+1) + EOT
     CHECK(j1587::segmentsFor(plen) == 3);  // 15 + 15 + 14
+  }
+
+  // ---- scroll speed code after each mode field (1 = 0x15 ... 5 = 0x19)
+  {
+    j1587::Page pages[] = {{"HI", 'a', 0, 5}, {"YO", 'a', 0, 1}, {"NO", 0, 0, 0}};
+    uint8_t payload[64];
+    size_t plen = j1587::buildPayloadPages(payload, sizeof(payload), pages, 3);
+    const uint8_t expected[] = {'A', 'B', 0x1B, 0x20, 'a', 0x19, 'H', 'I',
+                                0x1B, 0x20, 'a', 0x15, 'Y', 'O', 'N', 'O', 0x04};
+    CHECK(bytes(payload, plen) == bytes(expected, sizeof(expected)));
+    j1587::Page bad = {"X", 'a', 0, 9};  // out of range: no speed byte
+    plen = j1587::buildPayloadPages(payload, sizeof(payload), &bad, 1);
+    CHECK(plen == 7);
   }
 
   // ---- long text splits into <= 21-byte frames, numbered from 1

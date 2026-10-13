@@ -328,7 +328,7 @@ Type any text and press Enter to display it (this turns weather off). Commands:
 | `/weather on\|off` | Switch between weather and your message |
 | `/update` | Fetch the weather now |
 | `/mode <name>` | `rotate` `hold` `flash` `rollup` `rolldown` `rollleft` `rollright` `wipeup` `wipedown` `wipeleft` `wiperight` `scroll` `auto` `rollin` `rollout` `wipein` `wipeout` `compressed` `twinkle` `sparkle` `snow` `interlock` `switch` `slide` `spray` `starburst` |
-| `/speed <0-5>` | 1 = slowest, 5 = fastest, 0 = sign default |
+| `/speed <0-5>` | Scroll speed for the weather and messages: 1 = slowest, 5 = fastest, 0 = sign default (also on the web page) |
 | `/color <name\|none>` | `red` `green` `amber` `orange` `yellow` `rainbow1` … (tricolor signs only) |
 | `/priority on\|off` | Use the priority file. It overrides all other messages and holds at most 125 bytes. |
 | `/clear` | Clear the priority message |
@@ -347,8 +347,11 @@ On your home network, browse to **http://ledsign.local**, or to the IP address
 shown by `/status` (some Android phones don't resolve `.local` names). The page
 lets you:
 
+- set the **scroll speed** (1 = slowest … 5 = fastest, or the sign's default)
+  for everything on the sign. It's saved, and what's showing is re-sent at
+  the new speed straight away. Same as `/speed` in the Serial Monitor;
 - set the city and units and switch to weather;
-- send a message with a mode, speed, colour and priority;
+- send a message with a mode, colour and priority;
 - change the home Wi-Fi network.
 
 The page has no login, so anyone on your home network can change the sign.

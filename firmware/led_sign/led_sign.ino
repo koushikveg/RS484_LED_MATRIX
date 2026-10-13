@@ -318,7 +318,7 @@ bool sendJ1587Pages(const j1587::Page* pages, size_t count) {
 }
 
 bool sendJ1587(const char* text, char mode) {
-  j1587::Page page = {text, mode, 0};
+  j1587::Page page = {text, mode, 0, 0};
   return sendJ1587Pages(&page, 1);
 }
 
@@ -333,7 +333,8 @@ bool sendPages(const alpha::Page* pages, size_t count, const alpha::TextOptions&
       for (size_t i = 0; i < n; ++i) {
         int m = pages[i].mode;
         bool valid = m >= 0 && (size_t)m < alpha::MODE_COUNT;
-        jp[i] = {pages[i].text, valid ? alpha::MODES[m].code : (char)0, valid ? alpha::MODES[m].special : (char)0};
+        jp[i] = {pages[i].text, valid ? alpha::MODES[m].code : (char)0, valid ? alpha::MODES[m].special : (char)0,
+                 opts.speed};
       }
       return sendJ1587Pages(jp, n);
     }
@@ -343,7 +344,8 @@ bool sendPages(const alpha::Page* pages, size_t count, const alpha::TextOptions&
       if (i) joined += "    ";
       joined += pages[i].text;
     }
-    return sendJ1587(joined.c_str(), 0);
+    j1587::Page plain = {joined.c_str(), 0, 0, opts.speed};
+    return sendJ1587Pages(&plain, 1);
   }
 
   uint8_t packet[MAX_MESSAGE_LEN + 160];
@@ -1082,6 +1084,16 @@ void handleRoot() {
   html += "<p class='status'>Showing: <b>" + String(settings.weatherOn ? "weather" : "message") +
           "</b><br>" + htmlEscape(settings.weatherOn ? lastSentWeather : settings.message) + "</p>";
 
+  // Scroll speed (applies to the weather and messages)
+  html += F("<h2>Scroll speed</h2><form method='post' action='/scrollspeed'>"
+            "<label>How fast text moves across the sign<select name='speed'>");
+  html += option("0", "Sign default", t.speed == 0);
+  for (int sp = 1; sp <= 5; ++sp) {
+    String label = String(sp) + (sp == 1 ? " (slowest)" : sp == 5 ? " (fastest)" : "");
+    html += option(String(sp), label, sp == t.speed);
+  }
+  html += F("</select></label><button type='submit'>Set speed</button></form>");
+
   // Weather
   html += F("<h2>Weather</h2><form method='post' action='/weather'>"
             "<label>City <small>(name only, e.g. Milwaukee)</small><input name='location' value='");
@@ -1103,8 +1115,6 @@ void handleRoot() {
   html += F("'></label><div class='row'><label>Mode<select name='mode'>");
   for (size_t i = 0; i < alpha::MODE_COUNT; ++i)
     html += option(String(i), alpha::MODES[i].name, (int)i == t.mode);
-  html += F("</select></label><label>Speed<select name='speed'>");
-  for (int s = 0; s <= 5; ++s) html += option(String(s), s ? String(s) : String("default"), s == t.speed);
   html += F("</select></label></div><label>Color <small>(tricolor signs only)</small><select name='color'>");
   html += option("-1", "default", t.color < 0);
   for (size_t i = 0; i < alpha::COLOR_COUNT; ++i)
@@ -1156,14 +1166,24 @@ void handleSend() {
   if (m >= 0 && m < (int)alpha::MODE_COUNT) settings.text.mode = m;
   int c = server.arg("color").toInt();
   settings.text.color = (c >= 0 && c < (int)alpha::COLOR_COUNT) ? c : -1;
-  settings.text.speed = constrain(server.arg("speed").toInt(), 0, 5);
-
   bool wasPriority = settings.usePriority;
   settings.usePriority = server.hasArg("priority");
   if (wasPriority && !settings.usePriority) clearPriority();
 
   showMessage(server.hasArg("text") ? server.arg("text") : settings.message);
   redirectHome("");
+}
+
+void handleScrollSpeed() {
+  long sp = server.arg("speed").toInt();
+  if (sp < 0 || sp > 5) return redirectHome("Speed must be 1-5 or sign default.");
+  settings.text.speed = (uint8_t)sp;
+  saveSettings();
+  refreshDisplay();  // re-send what's showing at the new speed
+  String notice = "Scroll speed set to ";
+  notice += sp ? String(sp) : String("sign default");
+  notice += ".";
+  redirectHome(notice);
 }
 
 void handleClear() {
@@ -1191,6 +1211,7 @@ void startWebServer() {
   server.on("/update", HTTP_POST, handleUpdate);
   server.on("/send", HTTP_POST, handleSend);
   server.on("/clear", HTTP_POST, handleClear);
+  server.on("/scrollspeed", HTTP_POST, handleScrollSpeed);
   server.on("/wifi", HTTP_POST, handleWifi);
   server.begin();
 }
