@@ -50,9 +50,15 @@ Look for a label on the sign or cable, or tell me what you see.
 
 ## Parts
 
+This project was built and tested with the **Waveshare ESP32-S3-RS485-CAN**
+module, bought on Amazon (sold as KLAYERS):
+[amazon.com/dp/B0FWK6TL4L](https://www.amazon.com/dp/B0FWK6TL4L). See the
+[Waveshare product page](https://www.waveshare.com/esp32-s3-rs485-can.htm) and the
+[Waveshare wiki](https://www.waveshare.com/wiki/ESP32-S3-RS485-CAN) for its documentation.
+
 | Part | Notes |
 |---|---|
-| **ESP32-S3 RS485/CAN board** | Waveshare ESP32-S3-RS485-CAN, also sold as KLAYERS. It has an isolated RS-485 transceiver built in and runs on 7–36 V, so it can share the sign's 12 V supply. The firmware defaults are for this board. |
+| **ESP32-S3 RS485/CAN board** | [Waveshare ESP32-S3-RS485-CAN](https://www.amazon.com/dp/B0FWK6TL4L), also sold as KLAYERS. It has an isolated RS-485 transceiver built in and runs on 7–36 V, so it can share the sign's 12 V supply. The firmware defaults are for this board. |
 | 12 V power supply, ≥ 5 A | The sign draws about 36 W (3 A at 12 V). It accepts 9–26 V DC. |
 | Mating connector | The sign's 1 ft pigtail ends in an AMP Mate-N-Lok 6-pin cap (350781-1). It mates with a 6-pin Mate-N-Lok plug (e.g. TE 350715-1 + socket contacts). Check this against your cable, or cut the pigtail and splice it. |
 | 5 A inline fuse | On the +12 V feed. |
