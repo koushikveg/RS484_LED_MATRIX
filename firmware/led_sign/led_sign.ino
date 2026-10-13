@@ -338,7 +338,7 @@ bool setLocationByName(const String& name, String& error) {
   return true;
 }
 
-void showWeather(bool force = false) {
+void showWeather(bool force) {
   char lines[weather::MAX_PAGES][weather::PAGE_LEN];
   size_t count = 0;
 
@@ -394,7 +394,7 @@ void pollWeather() {
     nextFetchAt = millis() + retryDelay;
     retryDelay = std::min<uint32_t>(retryDelay * 2, WEATHER_INTERVAL_MS);
   }
-  showWeather();
+  showWeather(false);
 }
 
 // ---------------------------------------------------------------- display API
@@ -730,7 +730,7 @@ String option(const String& value, const String& label, bool selected) {
 
 String webNotice;  // one-shot message shown at the top of the page
 
-void redirectHome(const String& notice = "") {
+void redirectHome(const String& notice) {
   webNotice = notice;
   server.sendHeader("Location", "/");
   server.send(303);
@@ -842,7 +842,7 @@ void handleSend() {
   if (wasPriority && !settings.usePriority) clearPriority();
 
   showMessage(server.hasArg("text") ? server.arg("text") : settings.message);
-  redirectHome();
+  redirectHome("");
 }
 
 void handleClear() {
