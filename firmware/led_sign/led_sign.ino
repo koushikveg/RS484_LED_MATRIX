@@ -3,7 +3,7 @@
 //
 // Two display modes:
 //   * Weather (default, Ames, Iowa): joins your home Wi-Fi, pulls today's
-//     forecast from Open-Meteo every 15 minutes, and scrolls it right to left:
+//     forecast from Open-Meteo every 5 minutes, and scrolls it right to left:
 //     city, conditions, now/high/low, then precipitation type, amount and
 //     chance on one screen when the chance is above 5%, otherwise how
 //     cloudy the sky is.
@@ -64,7 +64,7 @@ const char* MDNS_NAME = "ledsign";
 
 constexpr uint32_t BOOT_SEND_DELAY_MS = 3000;             // let the sign boot first
 constexpr uint32_t WIFI_FALLBACK_MS = 20000;              // start the AP after this long offline
-constexpr uint32_t WEATHER_INTERVAL_MS = 15UL * 60 * 1000;  // Open-Meteo updates every 15 min
+constexpr uint32_t WEATHER_INTERVAL_MS = 5UL * 60 * 1000;   // fetch the forecast every 5 min
 constexpr uint32_t WEATHER_RETRY_MS = 60UL * 1000;        // first retry after a failed fetch
 constexpr uint32_t WEATHER_STALE_MS = 3UL * 60 * 60 * 1000;  // stop showing data older than this
 constexpr uint32_t WEATHER_RESEND_MS = 60UL * 60 * 1000;     // re-send hourly in case the sign lost power
@@ -111,7 +111,10 @@ constexpr uint32_t J1587_ACK_WAIT_MS = 500;
 
 struct Settings {
   uint8_t protocol = PROTO_J1587;
-  bool j1587Mode = false;  // prefix an Alpha mode code (e.g. scroll) to J1587 text
+  // Send each screen with its Alpha mode code (weather: scroll right to left,
+  // one screen after another). Off = plain text joined into one line, the
+  // exact format of the known-good example, as a fallback.
+  bool j1587Mode = true;
   uint32_t baud = 9600;
   uint8_t format = 0;  // index into FORMATS
   alpha::TextOptions text;
@@ -258,11 +261,11 @@ size_t readBus(uint8_t* buf, size_t cap, uint32_t timeoutMs, bool stopOnCts, uin
   return n;
 }
 
-// Sends text to the sign with the J1587 transport: RTS, wait for the sign's
+// Sends pages to the sign with the J1587 transport: RTS, wait for the sign's
 // CTS, then the data segments. Mirrors the known-good Linux program.
-bool sendJ1587(const char* text, char mode) {
+bool sendJ1587Pages(const j1587::Page* pages, size_t count) {
   uint8_t payload[j1587::MAX_PAYLOAD];
-  size_t plen = j1587::buildPayload(payload, sizeof(payload), text, mode);
+  size_t plen = j1587::buildPayloadPages(payload, sizeof(payload), pages, count);
   if (plen == 0) {
     Serial.printf("! message too long for the sign (max %u bytes)\n", (unsigned)j1587::MAX_PAYLOAD);
     return false;
@@ -308,18 +311,33 @@ bool sendJ1587(const char* text, char mode) {
   return true;
 }
 
+bool sendJ1587(const char* text, char mode) {
+  j1587::Page page = {text, mode, 0};
+  return sendJ1587Pages(&page, 1);
+}
+
 bool sendPages(const alpha::Page* pages, size_t count, const alpha::TextOptions& opts) {
   if (settings.protocol == PROTO_J1587) {
-    // One message: the pages joined with spaces. The mode (if enabled) comes
-    // from the first page, e.g. "rotate" for the weather scroll.
+    if (settings.j1587Mode) {
+      // Same screens and modes as the Alpha path: each page keeps its own
+      // mode field, so the weather screens each scroll right to left, one
+      // after another.
+      j1587::Page jp[weather::MAX_PAGES];
+      size_t n = count < weather::MAX_PAGES ? count : weather::MAX_PAGES;
+      for (size_t i = 0; i < n; ++i) {
+        int m = pages[i].mode;
+        bool valid = m >= 0 && (size_t)m < alpha::MODE_COUNT;
+        jp[i] = {pages[i].text, valid ? alpha::MODES[m].code : (char)0, valid ? alpha::MODES[m].special : (char)0};
+      }
+      return sendJ1587Pages(jp, n);
+    }
+    // Fallback: plain text joined into one line, no mode codes.
     String joined;
     for (size_t i = 0; i < count; ++i) {
       if (i) joined += "    ";
       joined += pages[i].text;
     }
-    int m = count ? pages[0].mode : -1;
-    char mode = (settings.j1587Mode && m >= 0 && (size_t)m < alpha::MODE_COUNT) ? alpha::MODES[m].code : 0;
-    return sendJ1587(joined.c_str(), mode);
+    return sendJ1587(joined.c_str(), 0);
   }
 
   uint8_t packet[MAX_MESSAGE_LEN + 160];
@@ -388,7 +406,7 @@ void loadSettings() {
   settings.showPlace = prefs.getBool("showplace", true);
   settings.fahrenheit = prefs.getBool("fahrenheit", true);
   settings.protocol = prefs.getUChar("proto", PROTO_J1587) == PROTO_ALPHA ? PROTO_ALPHA : PROTO_J1587;
-  settings.j1587Mode = prefs.getBool("j1587mode", false);
+  settings.j1587Mode = prefs.getBool("j1587mode", true);
   dePin = prefs.getInt("depin", RS485_DE_PIN);
   deActiveHigh = prefs.getBool("dehigh", RS485_DE_ACTIVE_HIGH);
   String addr = prefs.getString("addr", DEFAULT_SIGN_ADDRESS);
@@ -716,8 +734,8 @@ void printStatus() {
   Serial.printf("speed    : %s\n", t.speed ? String(t.speed).c_str() : "(sign default)");
   Serial.printf("priority : %s\n", settings.usePriority ? "on" : "off");
   if (settings.protocol == PROTO_J1587) {
-    Serial.printf("protocol : J1587 (9600 8N1, MID %02X -> %02X), mode prefix %s\n", j1587::MID_CONTROLLER,
-                  j1587::MID_SIGN, settings.j1587Mode ? "on" : "off");
+    Serial.printf("protocol : J1587 (9600 8N1, MID %02X -> %02X), screen modes %s\n", j1587::MID_CONTROLLER,
+                  j1587::MID_SIGN, settings.j1587Mode ? "on (scrolling screens)" : "off (plain text)");
   } else {
     Serial.printf("protocol : Alpha, serial %lu %s, checksum %s\n", (unsigned long)settings.baud,
                   FORMATS[settings.format].name, t.checksum ? "on" : "off");
@@ -772,7 +790,8 @@ void printHelp() {
       " Sign link\n"
       "  /protocol j1587|alpha  how text is sent (j1587 = TDR80x7 transit sign)\n"
       "  /j1587test         send \"HELLO\" exactly like the known-good Linux program\n"
-      "  /j1587mode on|off  prefix a scroll/mode code to J1587 text\n"
+      "  /j1587mode on|off  on: each screen keeps its mode (weather scrolls right to\n"
+      "                     left, one screen after another); off: plain text fallback\n"
       "  (the commands below apply to Alpha protocol only, except /de, /txtest, /txflip, /sniff)\n"
       "  /baud <rate>       1200 2400 4800 9600 19200 38400\n"
       "  /fmt 7E2|8N1       serial framing\n"

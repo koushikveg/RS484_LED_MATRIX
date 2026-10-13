@@ -78,11 +78,20 @@ inline size_t buildRts(uint8_t* out, uint8_t segments) {
   return n + 1;
 }
 
-// Builds the Alpha-style text payload: 'A' FileLabel [ESC 0x20 mode] text EOT.
-// Only printable ASCII (0x20-0x7E) from `text` is copied. `mode` is an Alpha
-// mode code such as 'a' (rotate) or 0 for none. Returns the payload length,
-// or 0 if it doesn't fit in `cap`.
-inline size_t buildPayload(uint8_t* out, size_t cap, const char* text, char mode) {
+// One display page inside the payload. With a mode, each page starts its own
+// Alpha mode field (ESC 0x20 mode [special]) and the sign shows the pages one
+// after another, e.g. each scrolling right to left with mode 'a' (rotate).
+struct Page {
+  const char* text;
+  char mode;     // Alpha mode code, e.g. 'a' = rotate; 0 = no mode field
+  char special;  // special-mode specifier when mode == 'n', else 0
+};
+
+// Builds the Alpha-style text payload:
+//   'A' FileLabel { [ESC 0x20 mode [special]] text }... EOT
+// Only printable ASCII (0x20-0x7E) from the page text is copied. Returns the
+// payload length, or 0 if it doesn't fit in `cap`.
+inline size_t buildPayloadPages(uint8_t* out, size_t cap, const Page* pages, size_t count) {
   size_t n = 0;
   auto put = [&](uint8_t b) {
     if (n < cap) out[n] = b;
@@ -90,17 +99,26 @@ inline size_t buildPayload(uint8_t* out, size_t cap, const char* text, char mode
   };
   put((uint8_t)CMD_WRITE_TEXT);
   put((uint8_t)FILE_LABEL);
-  if (mode) {
-    put(ESC);
-    put(0x20);  // display position (ignored on one-line signs)
-    put((uint8_t)mode);
-  }
-  for (const char* p = text; p && *p; ++p) {
-    uint8_t c = (uint8_t)*p;
-    if (c >= 0x20 && c <= 0x7E) put(c);
+  for (size_t i = 0; i < count; ++i) {
+    if (pages[i].mode) {
+      put(ESC);
+      put(0x20);  // display position (ignored on one-line signs)
+      put((uint8_t)pages[i].mode);
+      if (pages[i].special) put((uint8_t)pages[i].special);
+    }
+    for (const char* p = pages[i].text; p && *p; ++p) {
+      uint8_t c = (uint8_t)*p;
+      if (c >= 0x20 && c <= 0x7E) put(c);
+    }
   }
   put(EOT);
   return n <= cap ? n : 0;
+}
+
+// Single-page payload: 'A' FileLabel [ESC 0x20 mode] text EOT.
+inline size_t buildPayload(uint8_t* out, size_t cap, const char* text, char mode) {
+  Page page = {text, mode, 0};
+  return buildPayloadPages(out, cap, &page, 1);
 }
 
 inline size_t segmentsFor(size_t payloadLen) {

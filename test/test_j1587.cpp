@@ -66,6 +66,21 @@ int main() {
     CHECK(j1587::buildPayload(payload, 4, "TOO LONG", 0) == 0);
   }
 
+  // ---- weather-style screens: each keeps its own scroll mode, in order
+  {
+    j1587::Page pages[] = {{"AMES", 'a', 0}, {"NOW 62F  HIGH 66F  LOW 51F", 'a', 0}, {"X", 'n', '7'}};
+    uint8_t payload[j1587::MAX_PAYLOAD];
+    size_t plen = j1587::buildPayloadPages(payload, sizeof(payload), pages, 3);
+    std::vector<uint8_t> expected = {'A', 'B', 0x1B, 0x20, 'a', 'A', 'M', 'E', 'S', 0x1B, 0x20, 'a'};
+    const char* t = "NOW 62F  HIGH 66F  LOW 51F";
+    expected.insert(expected.end(), t, t + strlen(t));
+    const uint8_t tail[] = {0x1B, 0x20, 'n', '7', 'X', 0x04};
+    expected.insert(expected.end(), tail, tail + sizeof(tail));
+    CHECK(bytes(payload, plen) == expected);
+    CHECK(plen == 44);  // 2 + (3+4) + (3+26) + (4+1) + EOT
+    CHECK(j1587::segmentsFor(plen) == 3);  // 15 + 15 + 14
+  }
+
   // ---- long text splits into <= 21-byte frames, numbered from 1
   {
     const char* text = "NOW 62F  HIGH 66F  LOW 51F";  // 26 chars -> 29-byte payload

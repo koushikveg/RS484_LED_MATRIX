@@ -12,7 +12,7 @@ It has two display modes:
 
 - **Weather (default, set to Ames, Iowa):** the ESP32 joins your home Wi-Fi,
   pulls today's forecast from [Open-Meteo](https://open-meteo.com) (free, no
-  API key) every 15 minutes, and the sign scrolls it right to left, one screen
+  API key) every 5 minutes, and the sign scrolls it right to left, one screen
   after another:
   `AMES` → `PARTLY CLOUDY` → `NOW 62F  HIGH 66F  LOW 51F` → `SNOW 1.2 IN  40% CHANCE`
 - **Message:** shows any text you type.
@@ -401,8 +401,8 @@ ESP32 → sign  BC C6 0A BD 01 41 42 48 45 4C 4C 4F 04 BB   data  (PID 198, segm
 - `BC` is the controller's MID, `BD` the sign's.
 - The data is Alpha-style: write-text command `A`, file label `B`, the text, `EOT`.
 - Text longer than 12 characters is split into several PID 198 segments (15 data bytes each). The RTS's last byte is set to the segment count. That last part is inferred from the single-segment example, so the CTS is printed to check what the sign agrees to.
-- `/j1587mode on` puts an Alpha mode code (e.g. scroll) in front of the text. The known-good example doesn't use one, so it's off by default.
-- The weather screens are joined into one message.
+- Each screen keeps its own Alpha mode field (`ESC 0x20 a` = scroll right to left). The weather therefore plays as separate screens, one after another, exactly as with Alpha signs: `'A' 'B' ESC 20 'a' "AMES" ESC 20 'a' "PARTLY CLOUDY" … EOT`.
+- The known-good example sends plain text with no mode codes. If the sign rejects the mode codes, `/j1587mode off` falls back to plain text, with all screens joined into one line.
 
 ### Alpha protocol (`/protocol alpha`)
 
