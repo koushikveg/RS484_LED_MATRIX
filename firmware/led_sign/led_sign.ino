@@ -28,6 +28,7 @@
 #include <WiFiClientSecure.h>
 
 #include "AlphaSign.h"
+#include "J1587Sign.h"
 #include "Weather.h"
 
 // ---------------------------------------------------------------- configuration
@@ -95,7 +96,22 @@ struct SerialFormat {
 static const SerialFormat FORMATS[] = {{"7E2", SERIAL_7E2}, {"8N1", SERIAL_8N1}};
 constexpr size_t FORMAT_COUNT = sizeof(FORMATS) / sizeof(FORMATS[0]);
 
+// How text reaches the sign:
+//   J1587: J1708/J1587 transport (RTS -> CTS -> data) at 9600 8N1. This is
+//          what the TDR80x7 transit sign (PN 1105-2126) accepts on its J1708
+//          wires; byte layout from a known-good Linux program, see J1587Sign.h.
+//   ALPHA: plain Alpha protocol packets, for regular Alpha signs.
+enum Protocol : uint8_t { PROTO_J1587 = 0, PROTO_ALPHA = 1 };
+
+constexpr uint32_t J1587_IDLE_MS = 50;         // bus quiet before an RTS
+constexpr uint32_t J1587_CTS_TIMEOUT_MS = 1500;
+constexpr uint32_t J1587_TURNAROUND_MS = 80;   // after CTS, before data
+constexpr uint32_t J1587_SEGMENT_GAP_MS = 20;  // between data segments
+constexpr uint32_t J1587_ACK_WAIT_MS = 500;
+
 struct Settings {
+  uint8_t protocol = PROTO_J1587;
+  bool j1587Mode = false;  // prefix an Alpha mode code (e.g. scroll) to J1587 text
   uint32_t baud = 9600;
   uint8_t format = 0;  // index into FORMATS
   alpha::TextOptions text;
@@ -161,7 +177,11 @@ void applyDePin(int oldPin) {
 
 void applySerialSettings() {
   SignSerial.end();
-  SignSerial.begin(settings.baud, FORMATS[settings.format].config, RS485_RX_PIN, RS485_TX_PIN);
+  if (settings.protocol == PROTO_J1587) {
+    SignSerial.begin(9600, SERIAL_8N1, RS485_RX_PIN, RS485_TX_PIN);  // J1708 is fixed at 9600 8N1
+  } else {
+    SignSerial.begin(settings.baud, FORMATS[settings.format].config, RS485_RX_PIN, RS485_TX_PIN);
+  }
 }
 
 void sendBytes(const uint8_t* data, size_t len) {
@@ -207,7 +227,101 @@ void runTxFlip(int pin) {
   Serial.println("Flip test done.");
 }
 
+// ---------------------------------------------------------------- J1587
+
+void printHex(const char* label, const uint8_t* data, size_t len) {
+  Serial.printf("   [%s: %u bytes]", label, (unsigned)len);
+  for (size_t i = 0; i < len; ++i) Serial.printf(" %02X", data[i]);
+  Serial.println();
+}
+
+void clearRx() {
+  while (SignSerial.available()) SignSerial.read();
+}
+
+// Collects bytes from the bus for up to `timeoutMs`. Stops early once a CTS
+// frame has arrived (when `stopOnCts`), or after `quietMs` of silence once
+// something has been received.
+size_t readBus(uint8_t* buf, size_t cap, uint32_t timeoutMs, bool stopOnCts, uint32_t quietMs) {
+  size_t n = 0;
+  uint32_t start = millis();
+  uint32_t lastByte = start;
+  while (millis() - start < timeoutMs) {
+    while (SignSerial.available() && n < cap) {
+      buf[n++] = SignSerial.read();
+      lastByte = millis();
+    }
+    if (stopOnCts && j1587::findCts(buf, n, nullptr, nullptr)) break;
+    if (n > 0 && millis() - lastByte > quietMs) break;
+    delay(2);
+  }
+  return n;
+}
+
+// Sends text to the sign with the J1587 transport: RTS, wait for the sign's
+// CTS, then the data segments. Mirrors the known-good Linux program.
+bool sendJ1587(const char* text, char mode) {
+  uint8_t payload[j1587::MAX_PAYLOAD];
+  size_t plen = j1587::buildPayload(payload, sizeof(payload), text, mode);
+  if (plen == 0) {
+    Serial.printf("! message too long for the sign (max %u bytes)\n", (unsigned)j1587::MAX_PAYLOAD);
+    return false;
+  }
+  size_t segments = j1587::segmentsFor(plen);
+  uint8_t frame[j1587::MAX_FRAME];
+  uint8_t rx[96];
+
+  // 1. Quiet bus, then request to send.
+  clearRx();
+  delay(J1587_IDLE_MS);
+  size_t n = j1587::buildRts(frame, (uint8_t)segments);
+  sendBytes(frame, n);
+  clearRx();  // drop any echo of our own RTS
+
+  // 2. Wait for the sign's clear-to-send.
+  size_t got = readBus(rx, sizeof(rx), J1587_CTS_TIMEOUT_MS, true, 60);
+  printHex("sign CTS", rx, got);
+  uint8_t ctsSegments = 0, ctsNext = 0;
+  bool parsed = j1587::findCts(rx, got, &ctsSegments, &ctsNext);
+  // The reference program only checks that ~10 bytes came back, so accept an
+  // unrecognised reply of that size too, as long as it isn't our own echo.
+  bool ok = parsed || (got >= 10 && rx[0] != j1587::MID_CONTROLLER);
+  if (!ok) {
+    Serial.println("! no CTS from the sign; check wiring, power and /protocol");
+    return false;
+  }
+  if (parsed) Serial.printf("   CTS: send %u segment(s) from #%u (we have %u)\n", ctsSegments, ctsNext,
+                            (unsigned)segments);
+
+  // 3. Turnaround pause, then the data segments.
+  delay(J1587_TURNAROUND_MS);
+  for (size_t i = 0; i < segments; ++i) {
+    n = j1587::buildSegment(frame, payload, plen, i);
+    sendBytes(frame, n);
+    if (i + 1 < segments) delay(J1587_SEGMENT_GAP_MS);
+  }
+  clearRx();
+
+  // 4. Show whatever the sign answers (ACK / end of message).
+  got = readBus(rx, sizeof(rx), J1587_ACK_WAIT_MS, false, 100);
+  if (got) printHex("sign reply", rx, got);
+  return true;
+}
+
 bool sendPages(const alpha::Page* pages, size_t count, const alpha::TextOptions& opts) {
+  if (settings.protocol == PROTO_J1587) {
+    // One message: the pages joined with spaces. The mode (if enabled) comes
+    // from the first page, e.g. "rotate" for the weather scroll.
+    String joined;
+    for (size_t i = 0; i < count; ++i) {
+      if (i) joined += "    ";
+      joined += pages[i].text;
+    }
+    int m = count ? pages[0].mode : -1;
+    char mode = (settings.j1587Mode && m >= 0 && (size_t)m < alpha::MODE_COUNT) ? alpha::MODES[m].code : 0;
+    return sendJ1587(joined.c_str(), mode);
+  }
+
   uint8_t packet[MAX_MESSAGE_LEN + 160];
   size_t len = alpha::buildWriteTextPages(packet, sizeof(packet), opts, pages, count);
   if (len == 0) {
@@ -233,6 +347,8 @@ alpha::TextOptions currentOptions() {
 
 void saveSettings() {
   prefs.putUInt("baud", settings.baud);
+  prefs.putUChar("proto", settings.protocol);
+  prefs.putBool("j1587mode", settings.j1587Mode);
   prefs.putInt("depin", dePin);
   prefs.putBool("dehigh", deActiveHigh);
   prefs.putString("addr", settings.text.address);
@@ -271,6 +387,8 @@ void loadSettings() {
   settings.placeName = prefs.getString("place", settings.placeName);
   settings.showPlace = prefs.getBool("showplace", true);
   settings.fahrenheit = prefs.getBool("fahrenheit", true);
+  settings.protocol = prefs.getUChar("proto", PROTO_J1587) == PROTO_ALPHA ? PROTO_ALPHA : PROTO_J1587;
+  settings.j1587Mode = prefs.getBool("j1587mode", false);
   dePin = prefs.getInt("depin", RS485_DE_PIN);
   deActiveHigh = prefs.getBool("dehigh", RS485_DE_ACTIVE_HIGH);
   String addr = prefs.getString("addr", DEFAULT_SIGN_ADDRESS);
@@ -597,8 +715,13 @@ void printStatus() {
   Serial.printf("color    : %s\n", t.color >= 0 ? alpha::COLORS[t.color].name : "(sign default)");
   Serial.printf("speed    : %s\n", t.speed ? String(t.speed).c_str() : "(sign default)");
   Serial.printf("priority : %s\n", settings.usePriority ? "on" : "off");
-  Serial.printf("serial   : %lu %s, checksum %s\n", (unsigned long)settings.baud,
-                FORMATS[settings.format].name, t.checksum ? "on" : "off");
+  if (settings.protocol == PROTO_J1587) {
+    Serial.printf("protocol : J1587 (9600 8N1, MID %02X -> %02X), mode prefix %s\n", j1587::MID_CONTROLLER,
+                  j1587::MID_SIGN, settings.j1587Mode ? "on" : "off");
+  } else {
+    Serial.printf("protocol : Alpha, serial %lu %s, checksum %s\n", (unsigned long)settings.baud,
+                  FORMATS[settings.format].name, t.checksum ? "on" : "off");
+  }
   Serial.printf("address  : %c%c (sign type %c)\n", t.address[0], t.address[1], t.typeCode);
   if (dePin >= 0) {
     Serial.printf("rs485    : RX %d, TX %d, DE %d active %s\n", RS485_RX_PIN, RS485_TX_PIN, dePin,
@@ -647,6 +770,10 @@ void printHelp() {
       "  /clear             clear the priority message\n"
       "\n"
       " Sign link\n"
+      "  /protocol j1587|alpha  how text is sent (j1587 = TDR80x7 transit sign)\n"
+      "  /j1587test         send \"HELLO\" exactly like the known-good Linux program\n"
+      "  /j1587mode on|off  prefix a scroll/mode code to J1587 text\n"
+      "  (the commands below apply to Alpha protocol only, except /de, /txtest, /txflip, /sniff)\n"
       "  /baud <rate>       1200 2400 4800 9600 19200 38400\n"
       "  /fmt 7E2|8N1       serial framing\n"
       "  /checksum on|off   append a checksum to each packet\n"
@@ -816,7 +943,28 @@ void handleCommand(String line) {
     settings.text.checksum = arg.equalsIgnoreCase("on");
     saveSettings();
     refreshDisplay();
+  } else if (cmd == "/protocol") {
+    if (arg.equalsIgnoreCase("j1587")) settings.protocol = PROTO_J1587;
+    else if (arg.equalsIgnoreCase("alpha")) settings.protocol = PROTO_ALPHA;
+    else return (void)Serial.println("! usage: /protocol j1587 or /protocol alpha");
+    saveSettings();
+    applySerialSettings();
+    printStatus();
+  } else if (cmd == "/j1587test") {
+    if (settings.protocol != PROTO_J1587) {
+      settings.protocol = PROTO_J1587;
+      saveSettings();
+      applySerialSettings();
+    }
+    Serial.println("Sending HELLO with the J1587 handshake...");
+    Serial.println(sendJ1587("HELLO", 0) ? "Sent. Is HELLO on the sign?" : "Failed (see above).");
+  } else if (cmd == "/j1587mode") {
+    settings.j1587Mode = arg.equalsIgnoreCase("on");
+    saveSettings();
+    refreshDisplay();
   } else if (cmd == "/probe") {
+    if (settings.protocol == PROTO_J1587)
+      return (void)Serial.println("! /probe tests Alpha settings; switch with /protocol alpha first");
     runProbe();
   } else if (cmd == "/sniff") {
     sniffing = !sniffing;
