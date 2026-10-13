@@ -276,7 +276,7 @@ inline void formatInches(char* out, size_t cap, double inches, int decimals) {
 }
 
 // What kind of precipitation today's weather code describes.
-enum class CodeType { NONE, RAIN, FREEZING_RAIN, SNOW };
+enum class CodeType { NO_PRECIP, RAIN, FREEZING_RAIN, SNOW };
 
 inline CodeType codeType(int code) {
   switch (code) {
@@ -288,7 +288,7 @@ inline CodeType codeType(int code) {
     case 80: case 81: case 82: case 95: case 96: case 99:
       return CodeType::RAIN;
     default:
-      return CodeType::NONE;
+      return CodeType::NO_PRECIP;
   }
 }
 
