@@ -260,11 +260,35 @@ size_t readBus(uint8_t* buf, size_t cap, uint32_t timeoutMs, bool stopOnCts, uin
       buf[n++] = SignSerial.read();
       lastByte = millis();
     }
-    if (stopOnCts && j1587::findCts(buf, n, nullptr, nullptr)) break;
+    if (stopOnCts && j1587::findCts(buf, n)) break;
     if (n > 0 && millis() - lastByte > quietMs) break;
     delay(2);
   }
   return n;
+}
+
+// RTS layout the sign answered for multi-segment messages (saved). Single-
+// segment messages always use the exact known-good RTS.
+uint8_t rtsLayout = j1587::RTS_FIXED;
+
+void saveSettings();
+
+// Sends an RTS in `layout` and waits for the sign's CTS. Returns true if the
+// sign answered.
+bool requestToSend(uint8_t layout, size_t segments, size_t plen) {
+  uint8_t frame[j1587::MAX_FRAME];
+  uint8_t rx[96];
+  clearRx();
+  delay(J1587_IDLE_MS);
+  size_t n = j1587::buildRts(frame, layout, segments, plen);
+  sendBytes(frame, n);
+  clearRx();  // drop any echo of our own RTS
+
+  size_t got = readBus(rx, sizeof(rx), J1587_CTS_TIMEOUT_MS, true, 60);
+  printHex("sign CTS", rx, got);
+  // The reference program only checks that ~10 bytes came back, so accept an
+  // unrecognised reply of that size too, as long as it isn't our own echo.
+  return j1587::findCts(rx, got) || (got >= 10 && rx[0] != j1587::MID_CONTROLLER);
 }
 
 // Sends pages to the sign with the J1587 transport: RTS, wait for the sign's
@@ -277,44 +301,62 @@ bool sendJ1587Pages(const j1587::Page* pages, size_t count) {
     return false;
   }
   size_t segments = j1587::segmentsFor(plen);
+
+  // One segment: the exact known-good RTS. Several: the saved layout first,
+  // then the others. A long message counts as delivered only when the sign
+  // confirms it with an end-of-message frame; the layout that gets one is
+  // remembered.
+  uint8_t order[j1587::RTS_LAYOUT_COUNT];
+  size_t tries = 0;
+  if (segments == 1) {
+    order[tries++] = j1587::RTS_FIXED;
+  } else {
+    order[tries++] = rtsLayout;
+    for (uint8_t l = 0; l < j1587::RTS_LAYOUT_COUNT; ++l)
+      if (l != rtsLayout) order[tries++] = l;
+  }
+
   uint8_t frame[j1587::MAX_FRAME];
   uint8_t rx[96];
+  bool anyCts = false;
+  for (size_t t = 0; t < tries; ++t) {
+    if (segments > 1) {
+      Serial.printf("   RTS for %u segments, layout \"%s\"\n", (unsigned)segments, j1587::rtsLayoutName(order[t]));
+    }
+    if (!requestToSend(order[t], segments, plen)) continue;
+    anyCts = true;
 
-  // 1. Quiet bus, then request to send.
-  clearRx();
-  delay(J1587_IDLE_MS);
-  size_t n = j1587::buildRts(frame, (uint8_t)segments);
-  sendBytes(frame, n);
-  clearRx();  // drop any echo of our own RTS
+    // Turnaround pause, then the data segments.
+    delay(J1587_TURNAROUND_MS);
+    for (size_t i = 0; i < segments; ++i) {
+      size_t n = j1587::buildSegment(frame, payload, plen, i);
+      sendBytes(frame, n);
+      if (i + 1 < segments) delay(J1587_SEGMENT_GAP_MS);
+    }
+    clearRx();
 
-  // 2. Wait for the sign's clear-to-send.
-  size_t got = readBus(rx, sizeof(rx), J1587_CTS_TIMEOUT_MS, true, 60);
-  printHex("sign CTS", rx, got);
-  uint8_t ctsSegments = 0, ctsNext = 0;
-  bool parsed = j1587::findCts(rx, got, &ctsSegments, &ctsNext);
-  // The reference program only checks that ~10 bytes came back, so accept an
-  // unrecognised reply of that size too, as long as it isn't our own echo.
-  bool ok = parsed || (got >= 10 && rx[0] != j1587::MID_CONTROLLER);
-  if (!ok) {
+    size_t got = readBus(rx, sizeof(rx), J1587_ACK_WAIT_MS, false, 100);
+    if (got) printHex("sign reply", rx, got);
+    if (j1587::findEom(rx, got)) {
+      Serial.printf("   sign confirmed the message (%u segment%s)\n", (unsigned)segments, segments == 1 ? "" : "s");
+      if (segments > 1 && order[t] != rtsLayout) {
+        rtsLayout = order[t];
+        saveSettings();
+        Serial.printf("   long messages use RTS layout \"%s\" from now on (saved)\n", j1587::rtsLayoutName(rtsLayout));
+      }
+      return true;
+    }
+    Serial.printf("   ! no end-of-message from the sign for %u segment%s\n", (unsigned)segments,
+                  segments == 1 ? "" : "s");
+    if (segments == 1) return true;  // matches the known-good program, which doesn't check
+  }
+
+  if (!anyCts) {
     Serial.println("! no CTS from the sign; check wiring, power and /protocol");
-    return false;
+  } else {
+    Serial.println("! the sign didn't confirm the long message with any RTS layout");
   }
-  if (parsed) Serial.printf("   CTS: send %u segment(s) from #%u (we have %u)\n", ctsSegments, ctsNext,
-                            (unsigned)segments);
-
-  // 3. Turnaround pause, then the data segments.
-  delay(J1587_TURNAROUND_MS);
-  for (size_t i = 0; i < segments; ++i) {
-    n = j1587::buildSegment(frame, payload, plen, i);
-    sendBytes(frame, n);
-    if (i + 1 < segments) delay(J1587_SEGMENT_GAP_MS);
-  }
-  clearRx();
-
-  // 4. Show whatever the sign answers (ACK / end of message).
-  got = readBus(rx, sizeof(rx), J1587_ACK_WAIT_MS, false, 100);
-  if (got) printHex("sign reply", rx, got);
-  return true;
+  return false;
 }
 
 bool sendJ1587(const char* text, char mode) {
@@ -375,6 +417,7 @@ void saveSettings() {
   prefs.putUInt("baud", settings.baud);
   prefs.putUChar("proto", settings.protocol);
   prefs.putBool("j1587mode", settings.j1587Mode);
+  prefs.putUChar("rtslayout", rtsLayout);
   prefs.putInt("depin", dePin);
   prefs.putBool("dehigh", deActiveHigh);
   prefs.putString("addr", settings.text.address);
@@ -415,6 +458,7 @@ void loadSettings() {
   settings.fahrenheit = prefs.getBool("fahrenheit", true);
   settings.protocol = prefs.getUChar("proto", PROTO_J1587) == PROTO_ALPHA ? PROTO_ALPHA : PROTO_J1587;
   settings.j1587Mode = prefs.getBool("j1587mode", true);
+  rtsLayout = prefs.getUChar("rtslayout", j1587::RTS_FIXED) % j1587::RTS_LAYOUT_COUNT;
   dePin = prefs.getInt("depin", RS485_DE_PIN);
   deActiveHigh = prefs.getBool("dehigh", RS485_DE_ACTIVE_HIGH);
   String addr = prefs.getString("addr", DEFAULT_SIGN_ADDRESS);
@@ -755,8 +799,10 @@ void printStatus() {
   Serial.printf("speed    : %s\n", t.speed ? String(t.speed).c_str() : "(sign default)");
   Serial.printf("priority : %s\n", settings.usePriority ? "on" : "off");
   if (settings.protocol == PROTO_J1587) {
-    Serial.printf("protocol : J1587 (9600 8N1, MID %02X -> %02X), screen modes %s\n", j1587::MID_CONTROLLER,
-                  j1587::MID_SIGN, settings.j1587Mode ? "on (scrolling screens)" : "off (plain text)");
+    Serial.printf("protocol : J1587 (9600 8N1, MID %02X -> %02X), screen modes %s, long-message RTS %s\n",
+                  j1587::MID_CONTROLLER, j1587::MID_SIGN,
+                  settings.j1587Mode ? "on (scrolling screens)" : "off (plain text)",
+                  j1587::rtsLayoutName(rtsLayout));
   } else {
     Serial.printf("protocol : Alpha, serial %lu %s, checksum %s\n", (unsigned long)settings.baud,
                   FORMATS[settings.format].name, t.checksum ? "on" : "off");

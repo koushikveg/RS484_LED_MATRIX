@@ -30,7 +30,7 @@ int main() {
   {
     const uint8_t expected[] = {0xBC, 0xC5, 0x07, 0xBD, 0x01, 0x00, 0x00, 0x00, 0x42, 0x01, 0x77};
     uint8_t out[j1587::MAX_FRAME];
-    size_t n = j1587::buildRts(out, 1);
+    size_t n = j1587::buildRts(out, j1587::RTS_FIXED, 1, 8);
     CHECK(bytes(out, n) == bytes(expected, sizeof(expected)));
     CHECK(j1587::checksumOk(out, n));
   }
@@ -115,21 +115,46 @@ int main() {
     }
     CHECK(rebuilt == bytes(payload, plen));
 
-    uint8_t rts[j1587::MAX_FRAME];
-    size_t n = j1587::buildRts(rts, 2);
-    CHECK(rts[9] == 2 && j1587::checksumOk(rts, n));
   }
 
-  // ---- CTS detection in received bytes (with junk before it)
+  // ---- RTS layouts (multi-segment message: 3 segments, 44 payload bytes)
   {
-    uint8_t cts[] = {0x00, 0xFF, 0xBD, 0xC5, 0x05, 0xBC, 0x02, 0x01, 0x01, 0x00, 0x00};
-    cts[sizeof(cts) - 1] = j1587::checksum(cts + 2, sizeof(cts) - 3);
-    uint8_t segs = 0, next = 0;
-    CHECK(j1587::findCts(cts, sizeof(cts), &segs, &next));
-    CHECK(segs == 1 && next == 1);
-    cts[sizeof(cts) - 1] ^= 0xFF;  // corrupt checksum
-    CHECK(!j1587::findCts(cts, sizeof(cts), &segs, &next));
-    CHECK(!j1587::findCts(cts, 4, &segs, &next));  // too short
+    uint8_t r[j1587::MAX_FRAME];
+    j1587::buildRts(r, j1587::RTS_FIXED, 3, 44);
+    const uint8_t fixed[] = {0xBC, 0xC5, 0x07, 0xBD, 0x01, 0x00, 0x00, 0x00, 0x42, 0x01, 0x77};
+    CHECK(bytes(r, 11) == bytes(fixed, 11));  // fixed layout ignores size: always known-good
+    j1587::buildRts(r, j1587::RTS_STANDARD, 3, 44);
+    CHECK(r[5] == 3 && r[6] == 44 && r[7] == 0 && r[8] == 0x42 && r[9] == 0x01 && j1587::checksumOk(r, 11));
+    j1587::buildRts(r, j1587::RTS_SEGS_FIRST, 3, 44);
+    CHECK(r[5] == 3 && r[6] == 0 && r[7] == 0 && r[9] == 0x01 && j1587::checksumOk(r, 11));
+    j1587::buildRts(r, j1587::RTS_TOTAL_ONLY, 3, 300);
+    CHECK(r[5] == 0 && r[6] == 44 && r[7] == 1 && r[9] == 0x01 && j1587::checksumOk(r, 11));  // 300 = 0x012C
+    j1587::buildRts(r, j1587::RTS_SEGS_LAST, 6, 80);
+    CHECK(r[5] == 0 && r[9] == 6 && j1587::checksumOk(r, 11));
+  }
+
+  // ---- the sign's real replies (captured on hardware)
+  {
+    const uint8_t cts[] = {0xBD, 0xC5, 0x06, 0xBC, 0x02, 0x00, 0x01, 0x42, 0x01, 0x76};
+    const uint8_t eom[] = {0xBD, 0xC5, 0x04, 0xBC, 0x03, 0x42, 0x01, 0x78};
+    CHECK(j1587::checksumOk(cts, sizeof(cts)) && j1587::checksumOk(eom, sizeof(eom)));
+    CHECK(j1587::findCts(cts, sizeof(cts)));
+    CHECK(!j1587::findEom(cts, sizeof(cts)));
+    CHECK(j1587::findEom(eom, sizeof(eom)));
+    CHECK(!j1587::findCts(eom, sizeof(eom)));
+    uint8_t data[8];
+    size_t dlen = 0;
+    CHECK(j1587::findConnMgmt(cts, sizeof(cts), j1587::CM_CTS, data, sizeof(data), &dlen));
+    CHECK(dlen == 4 && data[0] == 0x00 && data[1] == 0x01 && data[2] == 0x42 && data[3] == 0x01);
+    // with junk before it, and our own RTS echo (from BC, not the sign) ignored
+    const uint8_t mixed[] = {0x00, 0xBC, 0xC5, 0x07, 0xBD, 0x01, 0x00, 0x00, 0x00, 0x42, 0x01, 0x77,
+                             0xBD, 0xC5, 0x06, 0xBC, 0x02, 0x00, 0x01, 0x42, 0x01, 0x76};
+    CHECK(j1587::findCts(mixed, sizeof(mixed)));
+    CHECK(!j1587::findCts(mixed, 12));
+    uint8_t bad[sizeof(cts)];
+    memcpy(bad, cts, sizeof(cts));
+    bad[9] ^= 0xFF;  // corrupt checksum
+    CHECK(!j1587::findCts(bad, sizeof(bad)));
   }
 
   printf("%s (%d failure%s)\n", failures ? "FAILED" : "PASSED", failures, failures == 1 ? "" : "s");
