@@ -200,6 +200,31 @@ int main() {
     CHECK(weather::formatPages(f, "AMES", true, pages, 2) == 2);
   }
 
+  // ---- fitting held screens to a 13-character display
+  {
+    char sc[weather::MAX_SCREENS][weather::PAGE_LEN];
+    size_t k = weather::fitScreens("AMES", 13, sc, 0, weather::MAX_SCREENS);
+    CHECK(k == 1 && strcmp(sc[0], "AMES") == 0);
+    k = weather::fitScreens("PARTLY CLOUDY", 13, sc, k, weather::MAX_SCREENS);  // exactly 13
+    CHECK(k == 2 && strcmp(sc[1], "PARTLY CLOUDY") == 0);
+    k = weather::fitScreens("NOW 62F  HIGH 66F  LOW 51F", 13, sc, k, weather::MAX_SCREENS);
+    CHECK(k == 5);
+    CHECK(strcmp(sc[2], "NOW 62F") == 0 && strcmp(sc[3], "HIGH 66F") == 0 && strcmp(sc[4], "LOW 51F") == 0);
+    k = weather::fitScreens("MOSTLY CLOUDY  70% CLOUD COVER", 13, sc, k, weather::MAX_SCREENS);
+    CHECK(k == 8);
+    CHECK(strcmp(sc[5], "MOSTLY CLOUDY") == 0 && strcmp(sc[6], "70% CLOUD") == 0 && strcmp(sc[7], "COVER") == 0);
+    k = weather::fitScreens("RAIN 0.10 IN + SNOW 0.5 IN  60% CHANCE", 13, sc, 0, weather::MAX_SCREENS);
+    CHECK(k == 3);
+    CHECK(strcmp(sc[0], "RAIN 0.10 IN") == 0 && strcmp(sc[1], "+ SNOW 0.5 IN") == 0);
+    CHECK(strcmp(sc[2], "60% CHANCE") == 0);
+    k = weather::fitScreens("FREEZING RAIN 0.05 IN  30% CHANCE", 13, sc, 0, weather::MAX_SCREENS);
+    for (size_t i = 0; i < k; ++i) CHECK(strlen(sc[i]) <= 13);
+    k = weather::fitScreens("ABCDEFGHIJKLMNOPQRS", 13, sc, 0, weather::MAX_SCREENS);  // one long word: cut
+    CHECK(k >= 1 && strlen(sc[0]) == 13);
+    k = weather::fitScreens("A  B  C", 13, sc, 0, 2);  // respects maxOut
+    CHECK(k == 2);
+  }
+
   // ---- geocoding
   weather::Place place;
   CHECK(weather::parsePlace(GEOCODE, place));

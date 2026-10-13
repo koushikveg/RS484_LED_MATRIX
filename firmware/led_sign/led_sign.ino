@@ -3,7 +3,7 @@
 //
 // Two display modes:
 //   * Weather (default, Ames, Iowa): joins your home Wi-Fi, pulls today's
-//     forecast from Open-Meteo every 15 minutes, and scrolls it right to left:
+//     forecast from Open-Meteo every 5 minutes, and scrolls it right to left:
 //     city, conditions, now/high/low, then precipitation type, amount and
 //     chance on one screen when the chance is above 5%, otherwise how
 //     cloudy the sky is.
@@ -28,6 +28,7 @@
 #include <WiFiClientSecure.h>
 
 #include "AlphaSign.h"
+#include "J1587Sign.h"
 #include "Weather.h"
 
 // ---------------------------------------------------------------- configuration
@@ -63,7 +64,7 @@ const char* MDNS_NAME = "ledsign";
 
 constexpr uint32_t BOOT_SEND_DELAY_MS = 3000;             // let the sign boot first
 constexpr uint32_t WIFI_FALLBACK_MS = 20000;              // start the AP after this long offline
-constexpr uint32_t WEATHER_INTERVAL_MS = 15UL * 60 * 1000;  // Open-Meteo updates every 15 min
+constexpr uint32_t WEATHER_INTERVAL_MS = 5UL * 60 * 1000;   // fetch the forecast every 5 min
 constexpr uint32_t WEATHER_RETRY_MS = 60UL * 1000;        // first retry after a failed fetch
 constexpr uint32_t WEATHER_STALE_MS = 3UL * 60 * 60 * 1000;  // stop showing data older than this
 constexpr uint32_t WEATHER_RESEND_MS = 60UL * 60 * 1000;     // re-send hourly in case the sign lost power
@@ -80,7 +81,13 @@ constexpr double DEFAULT_LATITUDE = 42.0308;
 constexpr double DEFAULT_LONGITUDE = -93.6319;
 
 // How weather screens move: "rotate" scrolls each one right to left.
-const char* WEATHER_SCROLL_MODE = "rotate";
+// How weather screens appear: "rotate" scrolls each one right to left, one
+// after another; "hold" shows each screen still and switches to the next.
+const char* WEATHER_SCREEN_MODE = "rotate";
+
+// About 13 characters fit across the 80-column display. With "hold", wider
+// screens are split into several held screens so nothing is cut off.
+constexpr size_t SIGN_WIDTH_CHARS = 13;
 
 constexpr size_t MAX_MESSAGE_LEN = 240;
 
@@ -95,7 +102,25 @@ struct SerialFormat {
 static const SerialFormat FORMATS[] = {{"7E2", SERIAL_7E2}, {"8N1", SERIAL_8N1}};
 constexpr size_t FORMAT_COUNT = sizeof(FORMATS) / sizeof(FORMATS[0]);
 
+// How text reaches the sign:
+//   J1587: J1708/J1587 transport (RTS -> CTS -> data) at 9600 8N1. This is
+//          what the TDR80x7 transit sign (PN 1105-2126) accepts on its J1708
+//          wires; byte layout from a known-good Linux program, see J1587Sign.h.
+//   ALPHA: plain Alpha protocol packets, for regular Alpha signs.
+enum Protocol : uint8_t { PROTO_J1587 = 0, PROTO_ALPHA = 1 };
+
+constexpr uint32_t J1587_IDLE_MS = 50;         // bus quiet before an RTS
+constexpr uint32_t J1587_CTS_TIMEOUT_MS = 1500;
+constexpr uint32_t J1587_TURNAROUND_MS = 80;   // after CTS, before data
+constexpr uint32_t J1587_SEGMENT_GAP_MS = 20;  // between data segments
+constexpr uint32_t J1587_ACK_WAIT_MS = 500;
+
 struct Settings {
+  uint8_t protocol = PROTO_J1587;
+  // Send each screen with its Alpha mode code (weather: scroll right to left,
+  // one screen after another). Off = plain text joined into one line, the
+  // exact format of the known-good example, as a fallback.
+  bool j1587Mode = true;
   uint32_t baud = 9600;
   uint8_t format = 0;  // index into FORMATS
   alpha::TextOptions text;
@@ -161,7 +186,11 @@ void applyDePin(int oldPin) {
 
 void applySerialSettings() {
   SignSerial.end();
-  SignSerial.begin(settings.baud, FORMATS[settings.format].config, RS485_RX_PIN, RS485_TX_PIN);
+  if (settings.protocol == PROTO_J1587) {
+    SignSerial.begin(9600, SERIAL_8N1, RS485_RX_PIN, RS485_TX_PIN);  // J1708 is fixed at 9600 8N1
+  } else {
+    SignSerial.begin(settings.baud, FORMATS[settings.format].config, RS485_RX_PIN, RS485_TX_PIN);
+  }
 }
 
 void sendBytes(const uint8_t* data, size_t len) {
@@ -207,7 +236,118 @@ void runTxFlip(int pin) {
   Serial.println("Flip test done.");
 }
 
+// ---------------------------------------------------------------- J1587
+
+void printHex(const char* label, const uint8_t* data, size_t len) {
+  Serial.printf("   [%s: %u bytes]", label, (unsigned)len);
+  for (size_t i = 0; i < len; ++i) Serial.printf(" %02X", data[i]);
+  Serial.println();
+}
+
+void clearRx() {
+  while (SignSerial.available()) SignSerial.read();
+}
+
+// Collects bytes from the bus for up to `timeoutMs`. Stops early once a CTS
+// frame has arrived (when `stopOnCts`), or after `quietMs` of silence once
+// something has been received.
+size_t readBus(uint8_t* buf, size_t cap, uint32_t timeoutMs, bool stopOnCts, uint32_t quietMs) {
+  size_t n = 0;
+  uint32_t start = millis();
+  uint32_t lastByte = start;
+  while (millis() - start < timeoutMs) {
+    while (SignSerial.available() && n < cap) {
+      buf[n++] = SignSerial.read();
+      lastByte = millis();
+    }
+    if (stopOnCts && j1587::findCts(buf, n, nullptr, nullptr)) break;
+    if (n > 0 && millis() - lastByte > quietMs) break;
+    delay(2);
+  }
+  return n;
+}
+
+// Sends pages to the sign with the J1587 transport: RTS, wait for the sign's
+// CTS, then the data segments. Mirrors the known-good Linux program.
+bool sendJ1587Pages(const j1587::Page* pages, size_t count) {
+  uint8_t payload[j1587::MAX_PAYLOAD];
+  size_t plen = j1587::buildPayloadPages(payload, sizeof(payload), pages, count);
+  if (plen == 0) {
+    Serial.printf("! message too long for the sign (max %u bytes)\n", (unsigned)j1587::MAX_PAYLOAD);
+    return false;
+  }
+  size_t segments = j1587::segmentsFor(plen);
+  uint8_t frame[j1587::MAX_FRAME];
+  uint8_t rx[96];
+
+  // 1. Quiet bus, then request to send.
+  clearRx();
+  delay(J1587_IDLE_MS);
+  size_t n = j1587::buildRts(frame, (uint8_t)segments);
+  sendBytes(frame, n);
+  clearRx();  // drop any echo of our own RTS
+
+  // 2. Wait for the sign's clear-to-send.
+  size_t got = readBus(rx, sizeof(rx), J1587_CTS_TIMEOUT_MS, true, 60);
+  printHex("sign CTS", rx, got);
+  uint8_t ctsSegments = 0, ctsNext = 0;
+  bool parsed = j1587::findCts(rx, got, &ctsSegments, &ctsNext);
+  // The reference program only checks that ~10 bytes came back, so accept an
+  // unrecognised reply of that size too, as long as it isn't our own echo.
+  bool ok = parsed || (got >= 10 && rx[0] != j1587::MID_CONTROLLER);
+  if (!ok) {
+    Serial.println("! no CTS from the sign; check wiring, power and /protocol");
+    return false;
+  }
+  if (parsed) Serial.printf("   CTS: send %u segment(s) from #%u (we have %u)\n", ctsSegments, ctsNext,
+                            (unsigned)segments);
+
+  // 3. Turnaround pause, then the data segments.
+  delay(J1587_TURNAROUND_MS);
+  for (size_t i = 0; i < segments; ++i) {
+    n = j1587::buildSegment(frame, payload, plen, i);
+    sendBytes(frame, n);
+    if (i + 1 < segments) delay(J1587_SEGMENT_GAP_MS);
+  }
+  clearRx();
+
+  // 4. Show whatever the sign answers (ACK / end of message).
+  got = readBus(rx, sizeof(rx), J1587_ACK_WAIT_MS, false, 100);
+  if (got) printHex("sign reply", rx, got);
+  return true;
+}
+
+bool sendJ1587(const char* text, char mode) {
+  j1587::Page page = {text, mode, 0, 0};
+  return sendJ1587Pages(&page, 1);
+}
+
 bool sendPages(const alpha::Page* pages, size_t count, const alpha::TextOptions& opts) {
+  if (settings.protocol == PROTO_J1587) {
+    if (settings.j1587Mode) {
+      // Same screens and modes as the Alpha path: each page keeps its own
+      // mode field, so the weather screens each scroll right to left, one
+      // after another.
+      j1587::Page jp[weather::MAX_SCREENS];
+      size_t n = count < weather::MAX_SCREENS ? count : weather::MAX_SCREENS;
+      for (size_t i = 0; i < n; ++i) {
+        int m = pages[i].mode;
+        bool valid = m >= 0 && (size_t)m < alpha::MODE_COUNT;
+        jp[i] = {pages[i].text, valid ? alpha::MODES[m].code : (char)0, valid ? alpha::MODES[m].special : (char)0,
+                 opts.speed};
+      }
+      return sendJ1587Pages(jp, n);
+    }
+    // Fallback: plain text joined into one line, no mode codes.
+    String joined;
+    for (size_t i = 0; i < count; ++i) {
+      if (i) joined += "    ";
+      joined += pages[i].text;
+    }
+    j1587::Page plain = {joined.c_str(), 0, 0, opts.speed};
+    return sendJ1587Pages(&plain, 1);
+  }
+
   uint8_t packet[MAX_MESSAGE_LEN + 160];
   size_t len = alpha::buildWriteTextPages(packet, sizeof(packet), opts, pages, count);
   if (len == 0) {
@@ -233,6 +373,8 @@ alpha::TextOptions currentOptions() {
 
 void saveSettings() {
   prefs.putUInt("baud", settings.baud);
+  prefs.putUChar("proto", settings.protocol);
+  prefs.putBool("j1587mode", settings.j1587Mode);
   prefs.putInt("depin", dePin);
   prefs.putBool("dehigh", deActiveHigh);
   prefs.putString("addr", settings.text.address);
@@ -271,6 +413,8 @@ void loadSettings() {
   settings.placeName = prefs.getString("place", settings.placeName);
   settings.showPlace = prefs.getBool("showplace", true);
   settings.fahrenheit = prefs.getBool("fahrenheit", true);
+  settings.protocol = prefs.getUChar("proto", PROTO_J1587) == PROTO_ALPHA ? PROTO_ALPHA : PROTO_J1587;
+  settings.j1587Mode = prefs.getBool("j1587mode", true);
   dePin = prefs.getInt("depin", RS485_DE_PIN);
   deActiveHigh = prefs.getBool("dehigh", RS485_DE_ACTIVE_HIGH);
   String addr = prefs.getString("addr", DEFAULT_SIGN_ADDRESS);
@@ -427,13 +571,26 @@ void showWeather(bool force) {
                                  weather::MAX_PAGES);
   }
 
-  // Every screen scrolls right to left, one after another.
-  alpha::Page pages[weather::MAX_PAGES];
-  String summary;
+  // Each screen is shown in turn. Held screens must fit the display, so wide
+  // ones are split into several screens first.
+  int mode = alpha::findMode(WEATHER_SCREEN_MODE);
+  bool held = mode != alpha::findMode("rotate") && mode != alpha::findMode("compressed");
+  char screens[weather::MAX_SCREENS][weather::PAGE_LEN];
+  size_t screenCount = 0;
   for (size_t i = 0; i < count; ++i) {
-    pages[i] = {lines[i], alpha::findMode(WEATHER_SCROLL_MODE)};
-    summary += (i ? " | " : "") + String(lines[i]);
+    if (held) {
+      screenCount = weather::fitScreens(lines[i], SIGN_WIDTH_CHARS, screens, screenCount, weather::MAX_SCREENS);
+    } else if (screenCount < weather::MAX_SCREENS) {
+      strcpy(screens[screenCount++], lines[i]);
+    }
   }
+  alpha::Page pages[weather::MAX_SCREENS];
+  String summary;
+  for (size_t i = 0; i < screenCount; ++i) {
+    pages[i] = {screens[i], mode};
+    summary += (i ? " | " : "") + String(screens[i]);
+  }
+  count = screenCount;
 
   // Writing a TEXT file blanks the sign briefly, so only write on change
   // (plus an hourly refresh in case the sign was power cycled on its own).
@@ -597,8 +754,13 @@ void printStatus() {
   Serial.printf("color    : %s\n", t.color >= 0 ? alpha::COLORS[t.color].name : "(sign default)");
   Serial.printf("speed    : %s\n", t.speed ? String(t.speed).c_str() : "(sign default)");
   Serial.printf("priority : %s\n", settings.usePriority ? "on" : "off");
-  Serial.printf("serial   : %lu %s, checksum %s\n", (unsigned long)settings.baud,
-                FORMATS[settings.format].name, t.checksum ? "on" : "off");
+  if (settings.protocol == PROTO_J1587) {
+    Serial.printf("protocol : J1587 (9600 8N1, MID %02X -> %02X), screen modes %s\n", j1587::MID_CONTROLLER,
+                  j1587::MID_SIGN, settings.j1587Mode ? "on (scrolling screens)" : "off (plain text)");
+  } else {
+    Serial.printf("protocol : Alpha, serial %lu %s, checksum %s\n", (unsigned long)settings.baud,
+                  FORMATS[settings.format].name, t.checksum ? "on" : "off");
+  }
   Serial.printf("address  : %c%c (sign type %c)\n", t.address[0], t.address[1], t.typeCode);
   if (dePin >= 0) {
     Serial.printf("rs485    : RX %d, TX %d, DE %d active %s\n", RS485_RX_PIN, RS485_TX_PIN, dePin,
@@ -647,6 +809,11 @@ void printHelp() {
       "  /clear             clear the priority message\n"
       "\n"
       " Sign link\n"
+      "  /protocol j1587|alpha  how text is sent (j1587 = TDR80x7 transit sign)\n"
+      "  /j1587test         send \"HELLO\" exactly like the known-good Linux program\n"
+      "  /j1587mode on|off  on: each screen keeps its mode (weather scrolls right to\n"
+      "                     left, one screen after another); off: plain text fallback\n"
+      "  (the commands below apply to Alpha protocol only, except /de, /txtest, /txflip, /sniff)\n"
       "  /baud <rate>       1200 2400 4800 9600 19200 38400\n"
       "  /fmt 7E2|8N1       serial framing\n"
       "  /checksum on|off   append a checksum to each packet\n"
@@ -816,7 +983,28 @@ void handleCommand(String line) {
     settings.text.checksum = arg.equalsIgnoreCase("on");
     saveSettings();
     refreshDisplay();
+  } else if (cmd == "/protocol") {
+    if (arg.equalsIgnoreCase("j1587")) settings.protocol = PROTO_J1587;
+    else if (arg.equalsIgnoreCase("alpha")) settings.protocol = PROTO_ALPHA;
+    else return (void)Serial.println("! usage: /protocol j1587 or /protocol alpha");
+    saveSettings();
+    applySerialSettings();
+    printStatus();
+  } else if (cmd == "/j1587test") {
+    if (settings.protocol != PROTO_J1587) {
+      settings.protocol = PROTO_J1587;
+      saveSettings();
+      applySerialSettings();
+    }
+    Serial.println("Sending HELLO with the J1587 handshake...");
+    Serial.println(sendJ1587("HELLO", 0) ? "Sent. Is HELLO on the sign?" : "Failed (see above).");
+  } else if (cmd == "/j1587mode") {
+    settings.j1587Mode = arg.equalsIgnoreCase("on");
+    saveSettings();
+    refreshDisplay();
   } else if (cmd == "/probe") {
+    if (settings.protocol == PROTO_J1587)
+      return (void)Serial.println("! /probe tests Alpha settings; switch with /protocol alpha first");
     runProbe();
   } else if (cmd == "/sniff") {
     sniffing = !sniffing;
@@ -896,6 +1084,16 @@ void handleRoot() {
   html += "<p class='status'>Showing: <b>" + String(settings.weatherOn ? "weather" : "message") +
           "</b><br>" + htmlEscape(settings.weatherOn ? lastSentWeather : settings.message) + "</p>";
 
+  // Scroll speed (applies to the weather and messages)
+  html += F("<h2>Scroll speed</h2><form method='post' action='/scrollspeed'>"
+            "<label>How fast text moves across the sign<select name='speed'>");
+  html += option("0", "Sign default", t.speed == 0);
+  for (int sp = 1; sp <= 5; ++sp) {
+    String label = String(sp) + (sp == 1 ? " (slowest)" : sp == 5 ? " (fastest)" : "");
+    html += option(String(sp), label, sp == t.speed);
+  }
+  html += F("</select></label><button type='submit'>Set speed</button></form>");
+
   // Weather
   html += F("<h2>Weather</h2><form method='post' action='/weather'>"
             "<label>City <small>(name only, e.g. Milwaukee)</small><input name='location' value='");
@@ -917,8 +1115,6 @@ void handleRoot() {
   html += F("'></label><div class='row'><label>Mode<select name='mode'>");
   for (size_t i = 0; i < alpha::MODE_COUNT; ++i)
     html += option(String(i), alpha::MODES[i].name, (int)i == t.mode);
-  html += F("</select></label><label>Speed<select name='speed'>");
-  for (int s = 0; s <= 5; ++s) html += option(String(s), s ? String(s) : String("default"), s == t.speed);
   html += F("</select></label></div><label>Color <small>(tricolor signs only)</small><select name='color'>");
   html += option("-1", "default", t.color < 0);
   for (size_t i = 0; i < alpha::COLOR_COUNT; ++i)
@@ -970,14 +1166,24 @@ void handleSend() {
   if (m >= 0 && m < (int)alpha::MODE_COUNT) settings.text.mode = m;
   int c = server.arg("color").toInt();
   settings.text.color = (c >= 0 && c < (int)alpha::COLOR_COUNT) ? c : -1;
-  settings.text.speed = constrain(server.arg("speed").toInt(), 0, 5);
-
   bool wasPriority = settings.usePriority;
   settings.usePriority = server.hasArg("priority");
   if (wasPriority && !settings.usePriority) clearPriority();
 
   showMessage(server.hasArg("text") ? server.arg("text") : settings.message);
   redirectHome("");
+}
+
+void handleScrollSpeed() {
+  long sp = server.arg("speed").toInt();
+  if (sp < 0 || sp > 5) return redirectHome("Speed must be 1-5 or sign default.");
+  settings.text.speed = (uint8_t)sp;
+  saveSettings();
+  refreshDisplay();  // re-send what's showing at the new speed
+  String notice = "Scroll speed set to ";
+  notice += sp ? String(sp) : String("sign default");
+  notice += ".";
+  redirectHome(notice);
 }
 
 void handleClear() {
@@ -1005,6 +1211,7 @@ void startWebServer() {
   server.on("/update", HTTP_POST, handleUpdate);
   server.on("/send", HTTP_POST, handleSend);
   server.on("/clear", HTTP_POST, handleClear);
+  server.on("/scrollspeed", HTTP_POST, handleScrollSpeed);
   server.on("/wifi", HTTP_POST, handleWifi);
   server.begin();
 }

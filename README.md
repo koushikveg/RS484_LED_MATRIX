@@ -1,13 +1,18 @@
 # RS-485 LED Matrix Sign Controller (ESP32)
 
 ESP32 firmware for driving an **Adaptive Micro Systems 80×7 transit sign**
-(PN 1105-2126) over RS-485 using the **Alpha sign protocol**.
+(PN 1105-2126, model TDR80x7-.3A) over its RS-485 / J1708 wires.
+
+This sign only accepts text through the **SAE J1587 transport protocol**
+(request to send, then clear to send, then data) at 9600 8N1. It ignores
+plain Alpha packets. The firmware uses J1587 by default; plain Alpha protocol
+is still available for regular Alpha signs (`/protocol alpha`).
 
 It has two display modes:
 
 - **Weather (default, set to Ames, Iowa):** the ESP32 joins your home Wi-Fi,
   pulls today's forecast from [Open-Meteo](https://open-meteo.com) (free, no
-  API key) every 15 minutes, and the sign scrolls it right to left, one screen
+  API key) every 5 minutes, and the sign scrolls it right to left, one screen
   after another:
   `AMES` → `PARTLY CLOUDY` → `NOW 62F  HIGH 66F  LOW 51F` → `SNOW 1.2 IN  40% CHANCE`
 - **Message:** shows any text you type.
@@ -20,6 +25,7 @@ including Wi-Fi and location, are saved in flash and survive power cycles.
 |---|---|
 | [`docs/80x7_Transit_Sign_1105-2111.pdf`](docs/80x7_Transit_Sign_1105-2111.pdf) | Sign specs, power, connector pinout (sister model, see below) |
 | [`docs/Alpha_Sign_Communications_Protocol_9708-8061F.pdf`](docs/Alpha_Sign_Communications_Protocol_9708-8061F.pdf) | Alpha protocol reference (packet format, modes, colours) |
+| [`docs/j1587_data.c`](docs/j1587_data.c) | Known-good Linux program that shows "HELLO" on this sign over a USB-RS485 adapter; the J1587 byte layout comes from it |
 
 ## About the part number
 
@@ -132,25 +138,28 @@ Pins, the fallback access point and timing settings are at the top of
 `led_sign.ino`. You don't need to put your Wi-Fi password in the code (see
 below).
 
-## First power-up: finding the serial settings
+## First power-up: testing the sign link
 
-The sign datasheet only says "RS485". The protocol manual allows 1200–38400
-baud in either **7E2** (Alpha 1.0, older signs like this 2004 unit) or **8N1**
-(Alpha 2.0+). Alpha signs also *autobaud* on the five NUL bytes that start
-every packet, so the default **9600 7E2** will probably just work.
+1. Wire the sign and power it. It shows its boot screens
+   (`1105-6001a …`, `32K RAM`, the time, `ADDRESS = 01`).
+2. In the Serial Monitor type `/j1587test`. The ESP32 sends exactly the same
+   bytes as the known-good Linux program and prints what the sign answers:
+   ```
+   [sign CTS: 10 bytes] BD C5 …
+   ```
+   `HELLO` should appear on the sign.
+3. Type any message, or `/weather on` for the weather.
 
-If it doesn't:
+If there's no CTS line (`! no CTS from the sign`):
+- Swap the A/B wires.
+- Check that the RS-485 **GND** terminal is connected to sign pin 1.
+- Check `/status` shows `protocol : J1587` and `rs485 : … DE 21 active HIGH`.
 
-1. Type `/probe` in the Serial Monitor. The ESP32 tries every baud/format
-   combination, showing text like `9600 7E2` on the sign for 5 seconds each.
-2. When you see text appear, press Enter to stop the probe. Then set that combination,
-   e.g. `/baud 9600` and `/fmt 7E2`. Settings are saved.
-3. If nothing appears at all, swap the A/B wires, check pin 5 has 12 V, check
-   that the grounds are common, and run `/probe` again.
+`/txtest` and `/txflip` check the RS-485 output with a multimeter, and
+`/sniff` prints any bytes on the bus.
 
-If the sign still shows nothing, it may have been configured for a transit
-J1708/J1587 protocol instead of Alpha. If you have the vehicle's original head
-unit, connect it to the same A/B wires, type `/sniff`, and capture what it sends.
+**Alpha protocol signs:** `/protocol alpha` switches to plain Alpha packets.
+`/probe` then tries every Alpha baud rate, format and address.
 
 ## Connecting to Wi-Fi
 
@@ -262,9 +271,11 @@ shown on the web page or in `/status`.
 | Precipitation: type, amount and chance on one screen | `RAIN 0.30 IN  40% CHANCE` | When today's chance of precipitation is **above 5%** |
 | Clouds: how cloudy the sky is | `MOSTLY CLOUDY  70% CLOUD COVER` | Instead of precipitation, when the chance is **5% or less** |
 
-- Every screen scrolls right to left. To change that, set `WEATHER_SCROLL_MODE`
+- Every screen scrolls right to left. To change that, set `WEATHER_SCREEN_MODE`
   at the top of `led_sign.ino` to another mode from `/help`, e.g. `"hold"`.
-  (`/mode` only affects typed messages.)
+  (`/mode` only affects typed messages.) With `"hold"`, screens wider than the
+  sign's ~13 characters are split into several held screens, e.g.
+  `NOW 62F` → `HIGH 66F` → `LOW 51F`, so nothing is cut off.
 - **Type** comes from Open-Meteo's forecast for today: whichever of rain
   (including showers) and snowfall has an amount forecast. If neither has an
   amount, today's weather code decides. The precipitation screen can read:
@@ -317,7 +328,7 @@ Type any text and press Enter to display it (this turns weather off). Commands:
 | `/weather on\|off` | Switch between weather and your message |
 | `/update` | Fetch the weather now |
 | `/mode <name>` | `rotate` `hold` `flash` `rollup` `rolldown` `rollleft` `rollright` `wipeup` `wipedown` `wipeleft` `wiperight` `scroll` `auto` `rollin` `rollout` `wipein` `wipeout` `compressed` `twinkle` `sparkle` `snow` `interlock` `switch` `slide` `spray` `starburst` |
-| `/speed <0-5>` | 1 = slowest, 5 = fastest, 0 = sign default |
+| `/speed <0-5>` | Scroll speed for the weather and messages: 1 = slowest, 5 = fastest, 0 = sign default (also on the web page) |
 | `/color <name\|none>` | `red` `green` `amber` `orange` `yellow` `rainbow1` … (tricolor signs only) |
 | `/priority on\|off` | Use the priority file. It overrides all other messages and holds at most 125 bytes. |
 | `/clear` | Clear the priority message |
@@ -336,8 +347,11 @@ On your home network, browse to **http://ledsign.local**, or to the IP address
 shown by `/status` (some Android phones don't resolve `.local` names). The page
 lets you:
 
+- set the **scroll speed** (1 = slowest … 5 = fastest, or the sign's default)
+  for everything on the sign. It's saved, and what's showing is re-sent at
+  the new speed straight away. Same as `/speed` in the Serial Monitor;
 - set the city and units and switch to weather;
-- send a message with a mode, speed, colour and priority;
+- send a message with a mode, colour and priority;
 - change the home Wi-Fi network.
 
 The page has no login, so anyone on your home network can change the sign.
@@ -376,6 +390,27 @@ len = alpha::buildWriteTextPages(buf, sizeof(buf), opts, pages, 2);
 
 ## How the protocol works
 
+### J1587 (this sign, the default)
+
+Every J1708 message is `MID, PID, byte count, data…, checksum`. The checksum
+makes the 8-bit sum of the whole message zero, and a message is at most 21
+bytes. Sending "HELLO" (taken from [`docs/j1587_data.c`](docs/j1587_data.c)):
+
+```
+ESP32 → sign  BC C5 07 BD 01 00 00 00 42 01 77            RTS   (PID 197, to MID BD, 1 segment)
+sign → ESP32  BD C5 …                                     CTS   (~10 bytes)
+              80 ms pause
+ESP32 → sign  BC C6 0A BD 01 41 42 48 45 4C 4C 4F 04 BB   data  (PID 198, segment 1: 'A' 'B' "HELLO" EOT)
+```
+
+- `BC` is the controller's MID, `BD` the sign's.
+- The data is Alpha-style: write-text command `A`, file label `B`, the text, `EOT`.
+- Text longer than 12 characters is split into several PID 198 segments (15 data bytes each). The RTS's last byte is set to the segment count. That last part is inferred from the single-segment example, so the CTS is printed to check what the sign agrees to.
+- Each screen keeps its own Alpha mode field (`ESC 0x20 a` = scroll right to left). The weather therefore plays as separate screens, one after another, exactly as with Alpha signs: `'A' 'B' ESC 20 'a' "AMES" ESC 20 'a' "PARTLY CLOUDY" … EOT`.
+- The known-good example sends plain text with no mode codes. If the sign rejects the mode codes, `/j1587mode off` falls back to plain text, with all screens joined into one line.
+
+### Alpha protocol (`/protocol alpha`)
+
 Each message is a single packet (manual section 5.1 / 6.1.1):
 
 ```
@@ -399,4 +434,8 @@ Open-Meteo-shaped responses, including `null` values and accented place names:
 ```sh
 g++ -std=c++11 -Wall -Wextra -I firmware/led_sign test/test_alpha.cpp -o test_alpha && ./test_alpha
 g++ -std=c++11 -Wall -Wextra -I firmware/led_sign test/test_weather.cpp -o test_weather && ./test_weather
+g++ -std=c++11 -Wall -Wextra -I firmware/led_sign test/test_j1587.cpp -o test_j1587 && ./test_j1587
 ```
+
+`test_j1587` checks the J1587 packets byte for byte against the known-good
+Linux program.
