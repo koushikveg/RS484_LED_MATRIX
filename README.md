@@ -8,13 +8,18 @@ This sign only accepts text through the **SAE J1587 transport protocol**
 plain Alpha packets. The firmware uses J1587 by default; plain Alpha protocol
 is still available for regular Alpha signs (`/protocol alpha`).
 
-It has two display modes:
+It has three display modes:
 
 - **Weather (default, set to Ames, Iowa):** the ESP32 joins your home Wi-Fi,
   pulls today's forecast from [Open-Meteo](https://open-meteo.com) (free, no
   API key) every 5 minutes, and the sign scrolls it right to left, one screen
   after another:
   `AMES` → `PARTLY CLOUDY` → `NOW 62F  HIGH 66F  LOW 51F` → `SNOW 1.2 IN  40% CHANCE`
+- **Bus times:** pick a bus stop and lines on the web page and the sign shows
+  how many minutes until the next bus on each line, scrolling continuously:
+  `1 RED 4 MIN   2 GREEN 12 MIN   23 ORANGE NOW`. Times come from
+  [Transitland](https://www.transit.land) (free API key). Bus times can also
+  come first, followed by the weather screens.
 - **Message:** shows any text you type.
 
 You can control it from the USB Serial Monitor, from a web page
@@ -338,11 +343,87 @@ updates fail for 3 hours the sign shows `WEATHER OFFLINE` instead of old data.
 
 Typing a message switches to message mode. `/weather on` switches back.
 
+## Setting up bus times
+
+The sign can show how many minutes until the next bus at your stop, for as
+many lines as you like. Everything is set up on the web page
+(`http://ledsign.local`), in the **Bus times** section.
+
+1. **API key.** Bus times come from [Transitland](https://www.transit.land),
+   which needs a free API key (sign up on their site). Paste it into
+   **Transitland API key** and press **Save key**. The key is saved on the
+   ESP32. It isn't in the code, so it won't end up on GitHub. The page only
+   shows its last 4 characters.
+2. **Find your stop.** Type part of the stop's name or street under **Find a
+   stop**, e.g. `Beach` or `Lincoln Way`, and press **Search stops**. It
+   searches within 10 km of the weather location (Ames by default). Each
+   result shows the stop's code and, where Transitland lists them, its lines.
+   Stops on opposite sides of a street are usually separate stops, so pick the
+   side for the direction you ride. Press **Use this stop**.
+3. **Pick lines.** The page lists every line that stops there (from the next
+   24 hours of departures). Tick the ones you want. Tick none to show all of
+   them.
+4. **Show it.** Under **Show**, pick **Bus times only** or **Bus times, then
+   weather**, then press **Show bus times**.
+
+The sign then shows each line's name and the minutes until its next bus:
+
+```
+1 RED 4 MIN   2 GREEN 12 MIN   23 ORANGE NOW
+```
+
+- **Several lines:** they scroll by one after another, continuously.
+- **One line:** it scrolls too, like the other screens.
+- **Timing:** the minutes count down once a minute. `NOW` means the bus is
+  less than a minute away.
+- **No bus:** `NO BUS` means none is due on that line in the next 2 hours.
+- **Live times:** where the agency publishes live predictions, Transitland
+  uses them. Otherwise the times come from the timetable.
+- **With weather:** bus times come first, then the weather screens. They
+  always come first because the sign starts over each time the minutes change.
+
+**How often it checks.** Transitland's free plan allows 10,000 requests a
+month. The ESP32 downloads the next 2 hours of departures in one request and
+counts down on its own clock in between. So each check is one request, no
+matter how many lines you picked. **Check every** sets how often it checks;
+the menu shows how many requests a month each choice uses:
+
+| Check every | Requests a month |
+|---|---|
+| 2 min | 21,600 (over the free plan) |
+| 3 min | 14,400 (over the free plan) |
+| **5 min** (default) | 8,640 |
+| 10 min | 4,320 |
+| 15 min | 2,880 |
+
+It only checks while bus times are on the sign. Choosing a stop uses one
+extra request, and each stop search uses one.
+
+**What the sign shows when something is missing**
+
+| Sign shows | Meaning |
+|---|---|
+| `SET BUS API KEY` | Save your Transitland key on the web page |
+| `PICK A BUS STOP` | Search for and pick a stop |
+| `LOADING BUS TIMES` | Waiting for the first download, or for the internet clock |
+| `BUS TIMES OFFLINE` | Downloads have failed for 30 min or more (see the status line on the web page) |
+| `NO BUSES AT THIS STOP` | Transitland lists no departures from this stop in the next 24 hours |
+
+The status line under **Bus times** shows the stop, the lines, when it last
+updated and the last error. For example, `API key rejected (HTTP 401)` means
+the key is wrong, and `HTTP 429` means too many requests, so check less often.
+The ESP32 sets its clock from the internet (`pool.ntp.org`). Timetable times
+use US Central time (`BUS_TIMEZONE` in `led_sign.ino`).
+
+You can also do all of this from the Serial Monitor:
+`/buskey`, `/bussearch`, `/busstop`, `/buslines`, `/bus` and `/busevery`
+(see the table below).
+
 ## Using it
 
 ### Serial Monitor
 
-Type any text and press Enter to display it (this turns weather off). Commands:
+Type any text and press Enter to display it (this turns weather and bus times off). Commands:
 
 | Command | Effect |
 |---|---|
@@ -353,6 +434,13 @@ Type any text and press Enter to display it (this turns weather off). Commands:
 | `/showplace on\|off` | Include the city name in the cycle |
 | `/weather on\|off` | Switch between weather and your message |
 | `/update` | Fetch the weather now |
+| `/buskey <key>` | Save your Transitland API key |
+| `/bussearch <name>` | Find stops near the weather location, e.g. `/bussearch Beach` |
+| `/busstop <n\|id>` | Use stop `n` from the search (or a Transitland stop `onestop_id`) |
+| `/buslines [all\|n n …]` | List the stop's lines, or pick which to show (e.g. `/buslines 1 3`) |
+| `/bus on\|both\|off` | Bus times only / bus times then weather / off |
+| `/busevery <minutes>` | How often to check for bus times (default 5) |
+| `/busupdate` | Fetch bus times now |
 | `/mode <name>` | `rotate` `hold` `flash` `rollup` `rolldown` `rollleft` `rollright` `wipeup` `wipedown` `wipeleft` `wiperight` `scroll` `auto` `rollin` `rollout` `wipein` `wipeout` `compressed` `twinkle` `sparkle` `snow` `interlock` `switch` `slide` `spray` `starburst` |
 | `/speed <0-5>` | Scroll speed for the weather and messages: 1 = slowest, 5 = fastest, 0 = sign default (also on the web page) |
 | `/color <name\|none>` | `red` `green` `amber` `orange` `yellow` `rainbow1` … (tricolor signs only) |
@@ -377,6 +465,8 @@ lets you:
   for everything on the sign. It's saved, and what's showing is re-sent at
   the new speed straight away. Same as `/speed` in the Serial Monitor;
 - set the location (`City, State, Country`) and units and switch to weather;
+- set up bus times: save your Transitland key, find a stop, tick the lines to
+  show and how often to check (see [Setting up bus times](#setting-up-bus-times));
 - send a message with a mode, colour and priority;
 - change the home Wi-Fi network.
 
@@ -384,8 +474,11 @@ The page has no login, so anyone on your home network can change the sign.
 The fallback `LED-Sign` network only runs while home Wi-Fi is unavailable.
 **Change its password** (`AP_PASSWORD` in `led_sign.ino`).
 
-Your Wi-Fi password is stored in the ESP32's flash (not encrypted) and is never
-shown on the web page or in `/status`.
+Your Wi-Fi password and Transitland API key are stored in the ESP32's flash (not
+encrypted). They are never shown on the web page or in `/status`, apart from
+the key's last 4 characters. Requests to Open-Meteo and Transitland don't check
+HTTPS certificates. The key only gives read access to public timetables, but
+someone who can intercept your network traffic could copy it.
 
 ### From your own code
 
@@ -457,13 +550,17 @@ Each message is a single packet (manual section 5.1 / 6.1.1):
 
 The packet encoder is unit tested on a PC against the examples in the
 protocol manual (Appendix F). The weather parser is tested against
-Open-Meteo-shaped responses, including `null` values and accented place names:
+Open-Meteo-shaped responses, including `null` values and accented place names.
+The bus-times code is tested against Transitland-shaped responses, fed in small
+pieces as they arrive over Wi-Fi, including live and timetable times,
+cancelled trips and errors:
 
 ```sh
 g++ -std=c++11 -Wall -Wextra -I firmware/led_sign test/test_alpha.cpp -o test_alpha && ./test_alpha
 g++ -std=c++11 -Wall -Wextra -I firmware/led_sign test/test_weather.cpp -o test_weather && ./test_weather
 g++ -std=c++11 -Wall -Wextra -I firmware/led_sign test/test_j1587.cpp -o test_j1587 && ./test_j1587
 g++ -std=c++11 -Wall -Wextra -I firmware/led_sign test/test_geocode.cpp -o test_geocode && ./test_geocode
+g++ -std=c++11 -Wall -Wextra -I firmware/led_sign test/test_transit.cpp -o test_transit && ./test_transit
 ```
 
 `test_j1587` checks the J1587 packets byte for byte against the known-good
